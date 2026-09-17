@@ -1,0 +1,6 @@
+{
+  "name": "OCU Official Website",
+  "description": "The official digital home of the Omni Comic Universe (OCU), featuring comic catalogs, OCU Academy student study kits, and a premium purchasing experience.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

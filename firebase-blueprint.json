@@ -1,0 +1,134 @@
+{
+  "entities": {
+    "Comic": {
+      "title": "Comic",
+      "description": "OCU Comic Volume",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "volumeNumber": { "type": "number" },
+        "shortDescription": { "type": "string" },
+        "synopsis": { "type": "string" },
+        "price": { "type": "number" },
+        "releaseDate": { "type": "string" },
+        "releaseStatus": { "type": "string" },
+        "tags": { "type": "array" },
+        "readingAge": { "type": "string" },
+        "featured": { "type": "boolean" },
+        "coverImage": { "type": "string" },
+        "bannerImage": { "type": "string" },
+        "previewImages": { "type": "array" },
+        "digitalFile": { "type": "string" },
+        "series": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "language": { "type": "string" },
+        "isPremium": { "type": "boolean" }
+      },
+      "required": ["id", "title"]
+    },
+    "GiftCode": {
+      "title": "GiftCode",
+      "description": "OCU Gift Codes",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "status": { "type": "string" },
+        "remainingUses": { "type": "number" },
+        "usageLimit": { "type": "number" },
+        "expirationDate": { "type": "string" },
+        "redeemedBy": { "type": "string" },
+        "redeemedAt": { "type": "string" }
+      },
+      "required": ["code"]
+    },
+    "RedemptionHistory": {
+      "title": "RedemptionHistory",
+      "description": "Voucher Redemption History",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "code": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "redeemedAt": { "type": "string" }
+      },
+      "required": ["id", "code"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Purchase Orders",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "comicId": { "type": "string" },
+        "comicTitle": { "type": "string" },
+        "customerEmail": { "type": "string" },
+        "purchaseDate": { "type": "string" },
+        "price": { "type": "number" },
+        "status": { "type": "string" },
+        "paymentStatus": { "type": "string" }
+      },
+      "required": ["id", "comicId"]
+    },
+    "AcademyResource": {
+      "title": "AcademyResource",
+      "description": "OCU Academy Study Resource",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "stream": { "type": "string" },
+        "badge": { "type": "string" },
+        "description": { "type": "string" },
+        "features": { "type": "array" },
+        "chapters": { "type": "array" },
+        "examTips": { "type": "array" },
+        "docPages": { "type": "number" },
+        "pdfUrl": { "type": "string" },
+        "pdfFileName": { "type": "string" },
+        "tier": { "type": "string" },
+        "priceINR": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "title"]
+    },
+    "AcademySettings": {
+      "title": "AcademySettings",
+      "description": "OCU Academy Section Settings",
+      "type": "object",
+      "properties": {
+        "heading": { "type": "string" },
+        "subheading": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["heading"]
+    }
+  },
+  "firestore": {
+    "comics/{comicId}": {
+      "schema": "Comic",
+      "description": "Collection of comic books"
+    },
+    "gift_codes/{code}": {
+      "schema": "GiftCode",
+      "description": "Vouchers for access"
+    },
+    "redemption_history/{historyId}": {
+      "schema": "RedemptionHistory",
+      "description": "History of voucher redemptions"
+    },
+    "orders/{orderId}": {
+      "schema": "Order",
+      "description": "Customer purchase orders"
+    },
+    "academy_resources/{resourceId}": {
+      "schema": "AcademyResource",
+      "description": "Academy study resources and PDFs"
+    },
+    "academy_settings/{settingId}": {
+      "schema": "AcademySettings",
+      "description": "Academy section heading and configuration"
+    }
+  }
+}

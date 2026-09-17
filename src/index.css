@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Custom Color Palette Constants for ease of use in classes */
+  --color-ocu-dark: #050505;
+  --color-ocu-graphite: #121214;
+  --color-ocu-midnight: #0b0c10;
+  --color-ocu-crimson: #e50914;
+  --color-ocu-crimson-hover: #b80710;
+  --color-ocu-gold: #d4af37;
+  --color-ocu-gold-hover: #aa8c2c;
+  --color-ocu-gray: #8f9296;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-ocu-dark);
+    color: #ffffff;
+    font-family: var(--font-sans);
+    overflow-x: hidden;
+  }
+
+  /* Custom styling for sleek scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #050505;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #222225;
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ocu-crimson);
+  }
+}
+
+/* Custom glow animations or premium accents */
+.crimson-glow {
+  box-shadow: 0 0 25px -5px rgba(229, 9, 20, 0.2);
+}
+.gold-glow {
+  box-shadow: 0 0 25px -5px rgba(212, 175, 55, 0.15);
+}
+.text-stroke-premium {
+  -webkit-text-stroke: 1px rgba(255, 255, 255, 0.1);
+  color: transparent;
+}
+

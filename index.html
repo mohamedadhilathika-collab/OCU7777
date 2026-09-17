@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Omni Comic Universe (OCU) — Cinematic Digital Comic Bookstore</title>
+    <meta name="description" content="Explore and purchase premium indie digital comic books from Omni Comic Universe. Experience immersive storytelling, character logs, and our custom high-contrast cinematic comic reader." />
+    <meta name="keywords" content="Omni Comic Universe, OCU, digital comics, indie comics, comic book store, pdf comic reader, cinematic comics, graphic novels" />
+    <meta name="robots" content="index, follow" />
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Omni Comic Universe (OCU) — Cinematic Digital Comic Bookstore" />
+    <meta property="og:description" content="Explore and purchase premium indie digital comic books from Omni Comic Universe. Experience immersive storytelling with our high-contrast, cinematic comic reader." />
+    <meta property="og:site_name" content="Omni Comic Universe" />
+    
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:title" content="Omni Comic Universe (OCU) — Cinematic Digital Comic Bookstore" />
+    <meta property="twitter:description" content="Explore and purchase premium indie digital comic books from the OCU catalog." />
+
+    <!-- PWA & Mobile Capabilities -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#e6194b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Ocu77" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <!-- Favicon / Brand Touch Icon -->
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="alternate icon" type="image/png" href="/pwa-192x192.png" />
+
+    <!-- PDF.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+      // Configure PDF.js worker
+      if (window['pdfjs-dist/build/pdf']) {
+        window.pdfjsLib = window['pdfjs-dist/build/pdf'];
+      }
+      if (window.pdfjsLib) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      }
+    </script>
+
+    <style>
+      /* Install App Floating Button Styling */
+      #floating-install-btn {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        z-index: 9999;
+        display: none;
+        align-items: center;
+        gap: 8px;
+        background: linear-gradient(135deg, #181824 0%, #0d0d14 100%);
+        color: #ffffff;
+        border: 1px solid rgba(230, 25, 75, 0.45);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.65), 0 0 16px rgba(230, 25, 75, 0.25);
+        padding: 10px 18px;
+        border-radius: 9999px;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #floating-install-btn:hover {
+        background: linear-gradient(135deg, #e6194b 0%, #b91c1c 100%);
+        border-color: rgba(251, 191, 36, 0.7);
+        box-shadow: 0 10px 28px rgba(230, 25, 75, 0.45), 0 0 20px rgba(251, 191, 36, 0.3);
+        transform: translateY(-2px);
+      }
+      #floating-install-btn:active {
+        transform: translateY(0);
+      }
+      #floating-install-btn .pwa-icon {
+        width: 16px;
+        height: 16px;
+        color: #fbbf24;
+        transition: transform 0.3s ease;
+      }
+      #floating-install-btn:hover .pwa-icon {
+        transform: translateY(2px);
+        color: #ffffff;
+      }
+      @media (max-width: 640px) {
+        #floating-install-btn {
+          bottom: 20px;
+          right: 16px;
+          padding: 8px 14px;
+          font-size: 11px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- PWA In-App Floating Install Button -->
+    <button
+      id="floating-install-btn"
+      aria-label="Install App"
+      title="Install Ocu77 to your home screen or desktop"
+    >
+      <svg class="pwa-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="7 10 12 15 17 10"></polyline>
+        <line x1="12" y1="15" x2="12" y2="3"></line>
+      </svg>
+      <span>Install App</span>
+    </button>
+
+    <script type="module" src="/src/main.tsx"></script>
+
+    <!-- Custom PWA Install Pop-up Modal -->
+    <div id="install-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; align-items: center; justify-content: center;">
+      <div style="background: #111; border: 1px solid #333; padding: 25px; border-radius: 12px; text-align: center; max-width: 320px; color: white; font-family: sans-serif;">
+        <h2 style="margin-top: 0; color: #fff;">Install Omni Comic</h2>
+        <p style="color: #aaa; margin-bottom: 20px;">Install the universal hub on your device for a full-screen cinematic experience.</p>
+        <button id="modal-install-btn" style="background: red; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-right: 10px;">INSTALL NOW</button>
+        <button id="modal-close-btn" style="background: transparent; color: #888; border: 1px solid #555; padding: 12px 24px; border-radius: 5px; cursor: pointer;">LATER</button>
+      </div>
+    </div>
+
+    <!-- Unified PWA Service Worker & Installation Script -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js');
+      }
+
+      let deferredPrompt;
+      const installModal = document.getElementById('install-modal');
+      const modalInstallBtn = document.getElementById('modal-install-btn');
+      const modalCloseBtn = document.getElementById('modal-close-btn');
+      const floatingInstallBtn = document.getElementById('floating-install-btn');
+
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+        installModal.style.display = 'flex';
+        if (floatingInstallBtn) {
+          floatingInstallBtn.style.display = 'flex'; 
+        }
+      });
+
+      modalCloseBtn.addEventListener('click', () => {
+        installModal.style.display = 'none';
+      });
+
+      async function triggerInstall() {
+        if (deferredPrompt) {
+          installModal.style.display = 'none';
+          deferredPrompt.prompt();
+          const { outcome } = await deferredPrompt.userChoice;
+          if (outcome === 'accepted' && floatingInstallBtn) {
+            floatingInstallBtn.style.display = 'none';
+          }
+          deferredPrompt = null;
+        }
+      }
+
+      modalInstallBtn.addEventListener('click', triggerInstall);
+      if (floatingInstallBtn) {
+        floatingInstallBtn.addEventListener('click', triggerInstall);
+      }
+    </script>
+  </body>
+</html>
+
