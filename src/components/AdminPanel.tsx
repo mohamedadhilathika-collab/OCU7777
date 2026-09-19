@@ -6,10 +6,11 @@ import {
   Database, Activity, Edit3, BookOpen, DollarSign, UploadCloud, Tag, 
   Calendar, Layers, Archive, CheckSquare, X, LogOut, Settings, Award,
   AlertCircle, Copy, GraduationCap,
-  Ban, UserX, UserCheck, RefreshCw
+  Ban, UserX, UserCheck, RefreshCw, ShieldAlert
 } from 'lucide-react';
 import { ComicVolume, GiftCode, RedemptionHistory, Order, DiscountCoupon, FreeComicCoupon, CouponRedemption, AcademyResource, UserProfile } from '../types';
 import AcademyAdminTab from './AcademyAdminTab';
+import UserManagementAdmin from './UserManagementAdmin';
 import { 
   saveComicInSupabase, 
   deleteComicFromSupabase, 
@@ -64,6 +65,7 @@ interface AdminPanelProps {
   onSaveAcademyHeading?: (heading: string) => Promise<void>;
   onSaveAcademyResource?: (resource: AcademyResource) => Promise<void>;
   onDeleteAcademyResource?: (resourceId: string, index?: number) => Promise<void>;
+  showToast?: (message: string, type: 'info' | 'warning' | 'error' | 'success', title?: string) => void;
 }
 
 interface CinematicUploaderProps {
@@ -333,9 +335,35 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     display_name TEXT,
     avatar_url TEXT,
     last_login TEXT,
-    banned_until TIMESTAMPTZ
+    banned_until TIMESTAMPTZ,
+    is_banned BOOLEAN DEFAULT false,
+    device_id TEXT
 );
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS banned_until TIMESTAMPTZ;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS device_id TEXT;
+
+-- 10. Create banned_devices table
+CREATE TABLE IF NOT EXISTS public.banned_devices (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_id TEXT UNIQUE NOT NULL,
+    banned_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.banned_devices DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all public actions" ON public.banned_devices;
+CREATE POLICY "Allow all public actions" ON public.banned_devices FOR ALL USING (true) WITH CHECK (true);
+
+-- 11. Create purchases table for access management
+CREATE TABLE IF NOT EXISTS public.purchases (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    user_id TEXT,
+    email TEXT,
+    item_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.purchases DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all public actions" ON public.purchases;
+CREATE POLICY "Allow all public actions" ON public.purchases FOR ALL USING (true) WITH CHECK (true);
 
 -- Seed initial admin access code
 INSERT INTO public.admin_settings (key, value)
@@ -472,7 +500,7 @@ BEGIN
 END $$;
 `;
 
-type AdminTab = 'comics' | 'academy' | 'vouchers' | 'orders' | 'promotions' | 'security' | 'trash';
+type AdminTab = 'comics' | 'academy' | 'vouchers' | 'orders' | 'promotions' | 'security' | 'user_management' | 'trash';
 
 export default function AdminPanel({
   comics,
@@ -503,7 +531,8 @@ export default function AdminPanel({
   setAcademyResources,
   onSaveAcademyHeading,
   onSaveAcademyResource,
-  onDeleteAcademyResource
+  onDeleteAcademyResource,
+  showToast
 }: AdminPanelProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>('comics');
   const [showSqlSetup, setShowSqlSetup] = useState(false);
@@ -1671,6 +1700,7 @@ export default function AdminPanel({
           { id: 'orders', label: 'Order Registry', icon: CheckSquare },
           { id: 'promotions', label: 'Promotions', icon: Tag },
           { id: 'security', label: 'Security Node', icon: Settings },
+          { id: 'user_management', label: 'User Management & Anti-Piracy', icon: ShieldAlert },
           { id: 'trash', label: 'Trash Bin', icon: Trash2 }
         ].map((tab) => {
           const Icon = tab.icon;
@@ -4100,6 +4130,25 @@ export default function AdminPanel({
                 </div>
               </div>
 
+            </motion.div>
+          )}
+
+          {/* USER MANAGEMENT & ANTI-PIRACY TAB */}
+          {activeTab === 'user_management' && (
+            <motion.div
+              key="tab-user-management"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="space-y-6 text-left"
+            >
+              <UserManagementAdmin
+                comics={comics}
+                academyResources={academyResources}
+                orders={orders}
+                setOrders={setOrders}
+                showToast={showToast}
+              />
             </motion.div>
           )}
 

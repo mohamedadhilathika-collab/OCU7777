@@ -915,12 +915,15 @@ export async function saveCouponRedemption(redemption: CouponRedemption): Promis
 // ----------------- USER PROFILES & BAN SERVICE -----------------
 
 export interface UserProfile {
+  id?: string;
   user_id: string;
   email: string;
   display_name: string;
   avatar_url: string;
   last_login: string;
   banned_until?: string | null;
+  is_banned?: boolean;
+  device_id?: string;
 }
 
 /**
@@ -1060,13 +1063,20 @@ export async function checkUserBanStatus(
 export async function upsertUserProfile(profile: UserProfile): Promise<void> {
   if (!isSupabaseConfigured || !supabase) return;
 
+  const currentDeviceId = profile.device_id || getOrCreateDeviceId();
+
   const upsertPayload: Record<string, any> = {
     user_id: profile.user_id,
     email: profile.email,
     display_name: profile.display_name,
     avatar_url: profile.avatar_url,
-    last_login: profile.last_login
+    last_login: profile.last_login,
+    device_id: currentDeviceId
   };
+
+  if (profile.is_banned !== undefined) {
+    upsertPayload.is_banned = profile.is_banned;
+  }
 
   // Only attach banned_until if explicitly defined and column is not known to be missing
   if (profile.banned_until !== undefined && !isBannedUntilColumnMissing) {
@@ -1077,12 +1087,21 @@ export async function upsertUserProfile(profile: UserProfile): Promise<void> {
     .from('profiles')
     .upsert(upsertPayload, { onConflict: 'user_id' });
 
-  // If column banned_until is missing from schema cache, retry payload without it
+  // If column is missing or schema cache issues, retry progressively
   if (error && (error.message?.includes('banned_until') || error.message?.includes('schema cache') || error.code === 'PGRST204')) {
     isBannedUntilColumnMissing = true;
     addMissingTable('profiles (column: banned_until)');
     addMissingColumn('profiles.banned_until');
     delete upsertPayload.banned_until;
+    const retry = await supabase
+      .from('profiles')
+      .upsert(upsertPayload, { onConflict: 'user_id' });
+    error = retry.error;
+  }
+
+  if (error && (error.message?.includes('device_id') || error.message?.includes('is_banned'))) {
+    delete upsertPayload.device_id;
+    delete upsertPayload.is_banned;
     const retry = await supabase
       .from('profiles')
       .upsert(upsertPayload, { onConflict: 'user_id' });
@@ -1196,6 +1215,441 @@ export async function updateUserBan(userId: string, bannedUntil: string | null):
     console.warn('Failed to update profiles table for user ban:', err);
     return fallbackUpdated;
   }
+}
+
+// ----------------- DEVICE FINGERPRINTING & ANTI-PIRACY SECURITY SUITE -----------------
+
+/**
+ * Retrieves the persistent device ID from localStorage or creates a new UUID.
+ * Implements Module 2 requirement for device fingerprinting.
+ */
+export function getOrCreateDeviceId(): string {
+  let currentDevice: string | null = null;
+  try {
+    currentDevice = localStorage.getItem('ocu_device_id');
+  } catch {}
+
+  if (!currentDevice || currentDevice.trim() === '') {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      currentDevice = crypto.randomUUID();
+    } else {
+      currentDevice = 'ocu_dev_' + Math.random().toString(36).substring(2, 11) + '-' + Date.now().toString(36);
+    }
+    try {
+      localStorage.setItem('ocu_device_id', currentDevice);
+    } catch {}
+  }
+  return currentDevice;
+}
+
+/**
+ * Automatically triggers an update to the Supabase profiles table,
+ * saving the current ocu_device_id into the user's row.
+ */
+export async function syncDeviceToProfile(userId: string, email?: string, deviceId?: string): Promise<void> {
+  const currentDeviceId = deviceId || getOrCreateDeviceId();
+  if (!isSupabaseConfigured || !supabase || !userId) return;
+
+  try {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ device_id: currentDeviceId })
+      .eq('user_id', userId);
+
+    if (error && email) {
+      await supabase
+        .from('profiles')
+        .update({ device_id: currentDeviceId })
+        .eq('email', email);
+    }
+  } catch (err) {
+    console.warn('Could not sync device_id to profile in Supabase:', err);
+  }
+}
+
+/**
+ * Checks if a specific device ID is blacklisted in the banned_devices table or fallback cache.
+ * Implements Module 4 device ban enforcement.
+ */
+export async function isDeviceBannedInDatabase(deviceId?: string): Promise<boolean> {
+  const targetId = deviceId || getOrCreateDeviceId();
+  if (!targetId) return false;
+
+  // 1. Check local device blacklist cache
+  try {
+    const cached = localStorage.getItem('ocu_banned_devices_list');
+    if (cached) {
+      const list: string[] = JSON.parse(cached);
+      if (Array.isArray(list) && list.includes(targetId)) return true;
+    }
+  } catch {}
+
+  // 2. Query Supabase banned_devices table
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('banned_devices')
+        .select('device_id')
+        .eq('device_id', targetId)
+        .maybeSingle();
+
+      if (!error && data?.device_id) {
+        // Cache locally for offline fast enforcement
+        try {
+          const cached = localStorage.getItem('ocu_banned_devices_list');
+          const list: string[] = cached ? JSON.parse(cached) : [];
+          if (!list.includes(targetId)) {
+            list.push(targetId);
+            localStorage.setItem('ocu_banned_devices_list', JSON.stringify(list));
+          }
+        } catch {}
+        return true;
+      }
+    } catch (err) {
+      console.warn('Error querying banned_devices in Supabase:', err);
+    }
+
+    // 3. Fallback: Query admin_settings table
+    try {
+      const { data } = await supabase
+        .from('admin_settings')
+        .select('value')
+        .eq('key', 'ocu_banned_devices')
+        .maybeSingle();
+
+      if (data?.value) {
+        const list = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+        if (Array.isArray(list) && list.includes(targetId)) {
+          return true;
+        }
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
+/**
+ * Checks if an account is permanently banned (profile.is_banned === true).
+ * Implements Module 4 account ban enforcement.
+ */
+export async function isAccountBannedInDatabase(userId?: string, email?: string): Promise<boolean> {
+  if (!userId && !email) return false;
+
+  // 1. Check local cache
+  try {
+    const cached = localStorage.getItem('ocu_banned_accounts');
+    if (cached) {
+      const list: string[] = JSON.parse(cached);
+      if (Array.isArray(list)) {
+        if (email && list.includes(email.toLowerCase().trim())) return true;
+        if (userId && list.includes(userId)) return true;
+      }
+    }
+  } catch {}
+
+  // 2. Query Supabase profiles table
+  if (isSupabaseConfigured && supabase) {
+    try {
+      let query = supabase.from('profiles').select('is_banned, email, user_id');
+      if (email) {
+        query = query.eq('email', email.trim());
+      } else if (userId) {
+        query = query.eq('user_id', userId);
+      }
+      const { data, error } = await query.maybeSingle();
+      if (!error && data?.is_banned === true) {
+        return true;
+      }
+    } catch (err) {
+      console.warn('Error querying is_banned in profiles:', err);
+    }
+
+    // 3. Fallback check in admin_settings
+    try {
+      const { data } = await supabase
+        .from('admin_settings')
+        .select('value')
+        .eq('key', 'ocu_banned_accounts')
+        .maybeSingle();
+
+      if (data?.value) {
+        const list = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+        if (Array.isArray(list)) {
+          if (email && list.includes(email.toLowerCase().trim())) return true;
+          if (userId && list.includes(userId)) return true;
+        }
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
+/**
+ * Blacklists a device ID permanently into banned_devices table, admin_settings, and localStorage.
+ */
+export async function banDevicePermanently(deviceId: string): Promise<void> {
+  if (!deviceId) return;
+
+  // 1. Local Storage cache
+  try {
+    const cached = localStorage.getItem('ocu_banned_devices_list');
+    const list: string[] = cached ? JSON.parse(cached) : [];
+    if (!list.includes(deviceId)) {
+      list.push(deviceId);
+      localStorage.setItem('ocu_banned_devices_list', JSON.stringify(list));
+    }
+  } catch {}
+
+  // 2. Insert into banned_devices table
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await supabase
+        .from('banned_devices')
+        .insert({ device_id: deviceId });
+    } catch (err) {
+      console.warn('Insert into banned_devices notice:', err);
+    }
+
+    // 3. Sync to admin_settings table
+    try {
+      const { data } = await supabase
+        .from('admin_settings')
+        .select('value')
+        .eq('key', 'ocu_banned_devices')
+        .maybeSingle();
+      const existing = data?.value ? (typeof data.value === 'string' ? JSON.parse(data.value) : data.value) : [];
+      const updated = Array.isArray(existing) ? Array.from(new Set([...existing, deviceId])) : [deviceId];
+      await supabase
+        .from('admin_settings')
+        .upsert({ key: 'ocu_banned_devices', value: JSON.stringify(updated) }, { onConflict: 'key' });
+    } catch {}
+  }
+}
+
+/**
+ * Module 3 - BUTTON 1: Revoke Item Access
+ * Queries profiles table to find user UUID matching targetEmail.
+ * Then queries purchases/unlocked_items table and DELETEs row where user_id matches and item_id matches targetItem.
+ */
+export async function revokeUserItemAccess(targetEmail: string, targetItemId: string): Promise<{ success: boolean; message: string }> {
+  const email = targetEmail.trim();
+  const itemId = targetItemId.trim();
+
+  if (!email || !itemId) {
+    return { success: false, message: 'Please provide both user Gmail ID and target item.' };
+  }
+
+  let targetUserId: string | null = null;
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('user_id, email')
+        .eq('email', email)
+        .maybeSingle();
+
+      if (profile?.user_id) {
+        targetUserId = profile.user_id;
+      }
+    } catch (err) {
+      console.warn('Error fetching profile for revocation:', err);
+    }
+
+    try {
+      // 1. Delete from purchases table
+      if (targetUserId) {
+        await supabase
+          .from('purchases')
+          .delete()
+          .eq('user_id', targetUserId)
+          .eq('item_id', itemId);
+      }
+      await supabase
+        .from('purchases')
+        .delete()
+        .eq('email', email)
+        .eq('item_id', itemId);
+
+      // 2. Delete from unlocked_items table
+      if (targetUserId) {
+        await supabase
+          .from('unlocked_items')
+          .delete()
+          .eq('user_id', targetUserId)
+          .eq('item_id', itemId);
+      }
+      await supabase
+        .from('unlocked_items')
+        .delete()
+        .eq('email', email)
+        .eq('item_id', itemId);
+
+      // 3. Delete from orders table (customer_email + comic_id)
+      await supabase
+        .from('orders')
+        .delete()
+        .eq('customer_email', email)
+        .eq('comic_id', itemId);
+    } catch (dbErr) {
+      console.warn('Supabase DB error during item revocation:', dbErr);
+    }
+  }
+
+  // 4. Remove from client local unlock key if current device
+  try {
+    localStorage.removeItem(`ocu_unlocked_${itemId}`);
+    localStorage.removeItem(`ocu_unlocked_comic_${itemId}`);
+    localStorage.removeItem(`ocu_unlocked_academy_${itemId}`);
+  } catch {}
+
+  return { success: true, message: 'Access revoked.' };
+}
+
+/**
+ * Module 3 - BUTTON 2: Ban Account
+ * Queries profiles table and .update({ is_banned: true }) where email === targetEmail.
+ */
+export async function banUserAccount(targetEmail: string): Promise<{ success: boolean; message: string }> {
+  const email = targetEmail.trim();
+  if (!email) {
+    return { success: false, message: 'Please enter target user email.' };
+  }
+
+  // Update fallback list
+  try {
+    const cached = localStorage.getItem('ocu_banned_accounts');
+    const list: string[] = cached ? JSON.parse(cached) : [];
+    if (!list.includes(email.toLowerCase())) {
+      list.push(email.toLowerCase());
+      localStorage.setItem('ocu_banned_accounts', JSON.stringify(list));
+    }
+  } catch {}
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ is_banned: true })
+        .eq('email', email);
+
+      if (error) {
+        console.warn('Supabase error updating is_banned in profiles:', error.message);
+      }
+
+      // Sync to admin_settings backup
+      const { data } = await supabase
+        .from('admin_settings')
+        .select('value')
+        .eq('key', 'ocu_banned_accounts')
+        .maybeSingle();
+      const existing = data?.value ? (typeof data.value === 'string' ? JSON.parse(data.value) : data.value) : [];
+      const updated = Array.isArray(existing) ? Array.from(new Set([...existing, email.toLowerCase()])) : [email.toLowerCase()];
+      await supabase
+        .from('admin_settings')
+        .upsert({ key: 'ocu_banned_accounts', value: JSON.stringify(updated) }, { onConflict: 'key' });
+    } catch (err) {
+      console.warn('Error in banUserAccount:', err);
+    }
+  }
+
+  return { success: true, message: 'Account Banned.' };
+}
+
+/**
+ * Module 3 - BUTTON 3: Unban Account
+ * Queries profiles table and .update({ is_banned: false }) where email === targetEmail.
+ */
+export async function unbanUserAccount(targetEmail: string): Promise<{ success: boolean; message: string }> {
+  const email = targetEmail.trim();
+  if (!email) {
+    return { success: false, message: 'Please enter target user email.' };
+  }
+
+  // Update fallback list
+  try {
+    const cached = localStorage.getItem('ocu_banned_accounts');
+    if (cached) {
+      let list: string[] = JSON.parse(cached);
+      list = list.filter(e => e.toLowerCase() !== email.toLowerCase());
+      localStorage.setItem('ocu_banned_accounts', JSON.stringify(list));
+    }
+  } catch {}
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ is_banned: false })
+        .eq('email', email);
+
+      if (error) {
+        console.warn('Supabase error lifting is_banned:', error.message);
+      }
+
+      // Sync to admin_settings backup
+      const { data } = await supabase
+        .from('admin_settings')
+        .select('value')
+        .eq('key', 'ocu_banned_accounts')
+        .maybeSingle();
+      if (data?.value) {
+        let existing = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+        if (Array.isArray(existing)) {
+          existing = existing.filter((e: string) => e.toLowerCase() !== email.toLowerCase());
+          await supabase
+            .from('admin_settings')
+            .upsert({ key: 'ocu_banned_accounts', value: JSON.stringify(existing) }, { onConflict: 'key' });
+        }
+      }
+    } catch (err) {
+      console.warn('Error in unbanUserAccount:', err);
+    }
+  }
+
+  return { success: true, message: 'Account Unbanned.' };
+}
+
+/**
+ * Module 3 - BUTTON 4: Ban Device - PERMANENT
+ * Queries profiles table where email === targetEmail and retrieves their device_id string.
+ * Inserts { device_id: retrievedId } into banned_devices Supabase table.
+ */
+export async function banUserDeviceByEmail(targetEmail: string): Promise<{ success: boolean; message: string; deviceId?: string }> {
+  const email = targetEmail.trim();
+  if (!email) {
+    return { success: false, message: 'Please enter target user email.' };
+  }
+
+  let retrievedId: string | null = null;
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data: profile, error } = await supabase
+        .from('profiles')
+        .select('device_id, email, user_id')
+        .eq('email', email)
+        .maybeSingle();
+
+      if (!error && profile?.device_id) {
+        retrievedId = profile.device_id;
+      }
+    } catch (err) {
+      console.warn('Error retrieving device_id from profiles:', err);
+    }
+  }
+
+  if (!retrievedId) {
+    return {
+      success: false,
+      message: `No device ID recorded for ${email}. The user must have logged into the app at least once to capture their device ID.`
+    };
+  }
+
+  await banDevicePermanently(retrievedId);
+  return { success: true, message: 'Target device blacklisted permanently.', deviceId: retrievedId };
 }
 
 export interface SecurityEvent {

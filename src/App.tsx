@@ -35,7 +35,11 @@ import {
   fetchAcademySettingsFromSupabase,
   saveAcademyResourceInSupabase,
   saveAcademySettingsInSupabase,
-  deleteAcademyResourceFromSupabase
+  deleteAcademyResourceFromSupabase,
+  getOrCreateDeviceId,
+  syncDeviceToProfile,
+  isDeviceBannedInDatabase,
+  isAccountBannedInDatabase
 } from './lib/supabase';
 import {
   fetchAcademyResources,
@@ -112,6 +116,8 @@ export default function App() {
     return localStorage.getItem('ocu_guest_mode') === 'true';
   });
   const [banError, setBanError] = useState<string | null>(null);
+  const [isDeviceBlacklisted, setIsDeviceBlacklisted] = useState<boolean>(false);
+  const [permanentAccountBanError, setPermanentAccountBanError] = useState<string | null>(null);
 
   // Synchronized Comics Catalog & Purchase Registries
   const [comics, setComics] = useState<ComicVolume[]>([]);
@@ -457,8 +463,29 @@ export default function App() {
 
     // Check current session on load (Requirement 4: Persistent Block on Refresh)
     supabase.auth.getSession().then(async ({ data: { session } }) => {
+      const currentDeviceId = getOrCreateDeviceId();
+      const isDevBanned = await isDeviceBannedInDatabase(currentDeviceId);
+      if (isDevBanned) {
+        setIsDeviceBlacklisted(true);
+        return;
+      }
+
       if (session?.user) {
         const u = session.user;
+        syncDeviceToProfile(u.id, u.email, currentDeviceId).catch(console.error);
+
+        const isAccBanned = await isAccountBannedInDatabase(u.id, u.email);
+        if (isAccBanned) {
+          console.warn('[Security] User is permanently banned on initial session check. Logging out...');
+          await supabase.auth.signOut();
+          clearAdminState();
+          setUser(null);
+          setUserProfile(null);
+          setIsGuest(false);
+          setPermanentAccountBanError('SECURITY ALERT: Your account has been permanently banned for violating the Terms of Service.');
+          return;
+        }
+
         const banCheck = await checkUserBanStatus(u.id, u.user_metadata);
         if (banCheck.isBanned) {
           console.warn('[Security] User is temporarily banned on initial session check. Logging out...');
@@ -479,6 +506,7 @@ export default function App() {
           email: u.email || '',
           display_name: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0] || 'Unknown User',
           avatar_url: u.user_metadata?.avatar_url || '',
+          device_id: currentDeviceId,
           last_login: new Date().toISOString()
         };
         setUser(u);
@@ -494,6 +522,13 @@ export default function App() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log("Auth event:", event, session?.user?.email);
 
+      const currentDeviceId = getOrCreateDeviceId();
+      const isDevBanned = await isDeviceBannedInDatabase(currentDeviceId);
+      if (isDevBanned) {
+        setIsDeviceBlacklisted(true);
+        return;
+      }
+
       // Force admin state to false on every fresh login, sign-in, token refresh, or sign-out event
       if (event === 'SIGNED_IN' || event === 'SIGNED_OUT' || event === 'USER_UPDATED') {
         clearAdminState();
@@ -501,6 +536,20 @@ export default function App() {
 
       if (session?.user) {
         const u = session.user;
+        syncDeviceToProfile(u.id, u.email, currentDeviceId).catch(console.error);
+
+        const isAccBanned = await isAccountBannedInDatabase(u.id, u.email);
+        if (isAccBanned) {
+          console.warn('[Security] User is permanently banned on auth event. Logging out...');
+          await supabase.auth.signOut();
+          clearAdminState();
+          setUser(null);
+          setUserProfile(null);
+          setIsGuest(false);
+          setPermanentAccountBanError('SECURITY ALERT: Your account has been permanently banned for violating the Terms of Service.');
+          return;
+        }
+
         const banCheck = await checkUserBanStatus(u.id, u.user_metadata);
         if (banCheck.isBanned) {
           console.warn('[Security] User is temporarily banned on auth event. Logging out...');
@@ -521,6 +570,7 @@ export default function App() {
           email: u.email || '',
           display_name: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0] || 'Unknown User',
           avatar_url: u.user_metadata?.avatar_url || '',
+          device_id: currentDeviceId,
           last_login: new Date().toISOString()
         };
         setUser(u);
@@ -568,6 +618,17 @@ export default function App() {
         async (payload) => {
           console.log('⚡ [Realtime Ban Monitor] Profile change detected for active user:', payload);
           const updated = payload.new as any;
+          if (updated && updated.is_banned === true) {
+            console.warn('⚡ [Realtime Ban Monitor] User account permanently banned in real-time! Kicking immediately...');
+            await supabase.auth.signOut();
+            clearAdminState();
+            setUser(null);
+            setUserProfile(null);
+            setIsGuest(false);
+            setPermanentAccountBanError('SECURITY ALERT: Your account has been permanently banned for violating the Terms of Service.');
+            setView('home');
+            return;
+          }
           if (updated && updated.banned_until && isUserTemporarilyBanned(updated.banned_until)) {
             console.warn('⚡ [Realtime Ban Monitor] User has been banned in real-time by admin! Kicking immediately...');
             await supabase.auth.signOut();
@@ -589,6 +650,84 @@ export default function App() {
       supabase.removeChannel(banChannel);
     };
   }, [isConfigInitialized, user?.id, clearAdminState]);
+
+  // Realtime Device Ban Monitor: Listen for blacklisted devices
+  useEffect(() => {
+    if (!isConfigInitialized || !isSupabaseConfigured || !supabase) return;
+
+    const currentDeviceId = getOrCreateDeviceId();
+
+    const deviceBanChannel = supabase
+      .channel('realtime_device_blacklist_monitor')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'banned_devices',
+        },
+        (payload) => {
+          const inserted = payload.new as any;
+          if (inserted && inserted.device_id === currentDeviceId) {
+            console.warn('⚡ [Realtime Device Blacklist] Device match detected! Freezing app...');
+            setIsDeviceBlacklisted(true);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(deviceBanChannel);
+    };
+  }, [isConfigInitialized]);
+
+  // Top-Level Security Interceptor (The Gatekeeper)
+  // Runs on initial mount, route/view changes, and auth state
+  useEffect(() => {
+    let isCancelled = false;
+
+    async function runSecurityGatekeeper() {
+      const currentDeviceId = getOrCreateDeviceId();
+
+      // 1. Un-bypassable Device Ban check
+      try {
+        const isDeviceBanned = await isDeviceBannedInDatabase(currentDeviceId);
+        if (!isCancelled && isDeviceBanned) {
+          setIsDeviceBlacklisted(true);
+          return;
+        }
+      } catch (err) {
+        console.warn('[Gatekeeper] Device ban check note:', err);
+      }
+
+      // 2. Account Ban Enforcement for current user
+      if (user?.id || user?.email) {
+        try {
+          const isAccBanned = await isAccountBannedInDatabase(user.id, user.email);
+          if (!isCancelled && isAccBanned) {
+            console.warn('[Gatekeeper] Active account is banned. Terminating session...');
+            if (isSupabaseConfigured && supabase) {
+              await supabase.auth.signOut();
+            }
+            clearAdminState();
+            setUser(null);
+            setUserProfile(null);
+            setIsGuest(false);
+            setPermanentAccountBanError('SECURITY ALERT: Your account has been permanently banned for violating the Terms of Service.');
+            return;
+          }
+        } catch (err) {
+          console.warn('[Gatekeeper] Account ban check note:', err);
+        }
+      }
+    }
+
+    runSecurityGatekeeper();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [view, user, clearAdminState]);
 
   const handleUserLogout = async () => {
     // 1. Explicitly clear all admin-related states and storage flags
@@ -849,6 +988,62 @@ export default function App() {
   };
 
 
+  // Module 4: Device Ban Enforcement (Un-bypassable)
+  if (isDeviceBlacklisted) {
+    return (
+      <div 
+        id="device-blacklist-freeze-screen"
+        style={{ 
+          position: 'fixed', 
+          inset: 0, 
+          zIndex: 999999, 
+          background: 'black', 
+          color: 'red', 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'center', 
+          textAlign: 'center',
+          padding: '24px',
+          fontFamily: 'monospace'
+        }}
+      >
+        <div style={{ maxWidth: '650px', lineHeight: '1.6' }}>
+          <p style={{ fontSize: '18px', fontWeight: 'bold', letterSpacing: '0.05em' }}>
+            DEVICE BLACKLISTED: This device has been permanently banned from accessing Omni Comic Universal Hub due to severe Terms of Service violations. Access denied.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // Module 4: Account Ban Enforcement
+  if (permanentAccountBanError) {
+    return (
+      <div 
+        id="account-ban-security-screen"
+        style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: 999999,
+          background: 'black',
+          color: 'red',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          textAlign: 'center',
+          padding: '24px',
+          fontFamily: 'monospace'
+        }}
+      >
+        <div style={{ maxWidth: '650px', lineHeight: '1.6' }}>
+          <p style={{ fontSize: '18px', fontWeight: 'bold', letterSpacing: '0.05em', color: '#ff4d4d' }}>
+            SECURITY ALERT: Your account has been permanently banned for violating the Terms of Service.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (!isConfigInitialized) {
     return (
       <div className="min-h-screen bg-ocu-dark flex flex-col justify-center items-center">
@@ -1108,7 +1303,7 @@ export default function App() {
               </section>
 
               {/* 4. Latest Comic Strip horizontal overview */}
-              <section className="max-w-7xl mx-auto px-6 py-24 text-left space-y-12">
+              <section id="catalog-comics" className="max-w-7xl mx-auto px-6 py-24 text-left space-y-12 scroll-mt-24">
                 <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
                   <div>
                     <span className="font-mono text-[9px] tracking-widest text-ocu-gold uppercase font-bold">OCU COMIC ARCHIVE</span>
@@ -1147,9 +1342,11 @@ export default function App() {
 
               {/* 5. OCU ACADEMY SECTION */}
               <section
-                id="ocu-academy"
+                id="catalog-academy"
                 className="max-w-7xl mx-auto px-6 py-24 text-left border-t border-white/5 space-y-12 scroll-mt-24"
               >
+                {/* Legacy Anchor support */}
+                <div id="ocu-academy" className="scroll-mt-24" />
                 {/* Header with bold styling, badges, and dynamic custom heading */}
                 <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 border-b border-white/10 pb-8">
                   <div className="space-y-3">

@@ -31,6 +31,32 @@ export default function Header({ currentView, setView, isAdminLoggedIn, onOpenAd
     ...(isAdminLoggedIn ? [{ id: 'admin' as ViewState, label: 'Command', icon: Lock }] : []),
   ];
 
+  const handleComicsClick = (e?: React.MouseEvent) => {
+    if (e) e.preventDefault();
+    setMobileMenuOpen(false);
+    if (currentView !== 'home') {
+      setView('home');
+      setTimeout(() => {
+        document.getElementById('catalog-comics')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
+    } else {
+      document.getElementById('catalog-comics')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
+  const handleAcademyClick = (e?: React.MouseEvent) => {
+    if (e) e.preventDefault();
+    setMobileMenuOpen(false);
+    if (currentView !== 'home') {
+      setView('home');
+      setTimeout(() => {
+        document.getElementById('catalog-academy')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
+    } else {
+      document.getElementById('catalog-academy')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
 
   return (
     <header
@@ -80,9 +106,13 @@ export default function Header({ currentView, setView, isAdminLoggedIn, onOpenAd
               <button
                 id={`nav-item-${item.id}`}
                 key={item.id}
-                onClick={() => {
-                  setView(item.id);
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                onClick={(e) => {
+                  if (item.id === 'comics') {
+                    handleComicsClick(e);
+                  } else {
+                    setView(item.id);
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }
                 }}
                 className={`relative px-4 py-2 rounded-md font-display font-medium text-sm transition-all duration-300 flex items-center gap-2 cursor-pointer ${
                   isActive
@@ -102,23 +132,15 @@ export default function Header({ currentView, setView, isAdminLoggedIn, onOpenAd
               </button>
             );
           })}
-          <a
+          <button
             id="nav-item-ocu-academy"
-            href="#ocu-academy"
-            onClick={(e) => {
-              if (currentView !== 'home') {
-                e.preventDefault();
-                setView('home');
-                setTimeout(() => {
-                  document.getElementById('ocu-academy')?.scrollIntoView({ behavior: 'smooth' });
-                }, 150);
-              }
-            }}
+            type="button"
+            onClick={handleAcademyClick}
             className="relative px-4 py-2 rounded-md font-display font-medium text-sm transition-all duration-300 flex items-center gap-2 text-ocu-gray hover:text-white cursor-pointer hover:bg-white/[0.03]"
           >
             <GraduationCap size={14} className="text-ocu-gold" />
             <span>OCU Academy</span>
-          </a>
+          </button>
         </nav>
 
         {/* Action Button */}
@@ -217,10 +239,14 @@ export default function Header({ currentView, setView, isAdminLoggedIn, onOpenAd
                   <button
                     id={`mobile-nav-item-${item.id}`}
                     key={item.id}
-                    onClick={() => {
-                      setView(item.id);
-                      setMobileMenuOpen(false);
-                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    onClick={(e) => {
+                      if (item.id === 'comics') {
+                        handleComicsClick(e);
+                      } else {
+                        setView(item.id);
+                        setMobileMenuOpen(false);
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }
                     }}
                     className={`flex items-center gap-3 px-4 py-3 rounded-lg font-display text-base font-semibold transition-all duration-200 cursor-pointer ${
                       isActive
@@ -233,24 +259,15 @@ export default function Header({ currentView, setView, isAdminLoggedIn, onOpenAd
                   </button>
                 );
               })}
-              <a
+              <button
                 id="mobile-nav-item-ocu-academy"
-                href="#ocu-academy"
-                onClick={(e) => {
-                  setMobileMenuOpen(false);
-                  if (currentView !== 'home') {
-                    e.preventDefault();
-                    setView('home');
-                    setTimeout(() => {
-                      document.getElementById('ocu-academy')?.scrollIntoView({ behavior: 'smooth' });
-                    }, 150);
-                  }
-                }}
-                className="flex items-center gap-3 px-4 py-3 rounded-lg font-display text-base font-semibold text-ocu-gray hover:text-white hover:bg-white/[0.02] transition-all duration-200 cursor-pointer"
+                type="button"
+                onClick={handleAcademyClick}
+                className="flex items-center gap-3 px-4 py-3 rounded-lg font-display text-base font-semibold text-ocu-gray hover:text-white hover:bg-white/[0.02] transition-all duration-200 cursor-pointer text-left"
               >
                 <GraduationCap size={18} className="text-ocu-gold" />
                 <span>OCU Academy</span>
-              </a>
+              </button>
             </div>
 
             <div className="h-[1px] bg-white/10 my-1" />
@@ -296,10 +313,7 @@ export default function Header({ currentView, setView, isAdminLoggedIn, onOpenAd
 
             <button
               id="mobile-nav-btn-comics"
-              onClick={() => {
-                setView('comics');
-                setMobileMenuOpen(false);
-              }}
+              onClick={handleComicsClick}
               className="w-full py-3 bg-gradient-to-r from-ocu-crimson to-ocu-crimson-hover hover:from-red-600 hover:to-red-700 text-white font-display text-center text-sm font-bold tracking-widest uppercase rounded cursor-pointer transition-all duration-300 shadow-lg shadow-ocu-crimson/20"
             >
               BROWSE CATALOGUE

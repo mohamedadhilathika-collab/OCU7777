@@ -111,12 +111,15 @@ export interface CouponRedemption {
 }
 
 export interface UserProfile {
+  id?: string;
   user_id: string;
   email: string;
   display_name: string;
   avatar_url: string;
   last_login: string;
   banned_until?: string | null;
+  is_banned?: boolean;
+  device_id?: string | null;
 }
 
 export interface AcademyChapter {
