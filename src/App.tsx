@@ -632,10 +632,26 @@ export default function App() {
     try {
       await saveOrderInSupabase(newOrder);
       console.log('Successfully saved purchase order to Supabase:', newOrder.id);
+      setOrders(prev => [newOrder, ...prev.filter(o => o.id !== newOrder.id)]);
       await loadSupabaseData();
     } catch (err) {
       console.error('Failed to save purchase order to Supabase:', err);
     }
+  };
+
+  const handleUnlockComic = async (comic: ComicVolume) => {
+    const customerEmail = user?.email || 'mohamedadhilathika@gmail.com';
+    const newOrder: Order = {
+      id: `OCU-${Math.floor(100000 + Math.random() * 900000)}-UPI`,
+      comicId: comic.id,
+      comicTitle: comic.title,
+      customerEmail: customerEmail,
+      purchaseDate: new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
+      price: comic.price,
+      status: 'Completed',
+      paymentStatus: 'Paid'
+    };
+    await handleOrderCreated(newOrder);
   };
 
   // Gift System Event Handlers
@@ -1056,6 +1072,8 @@ export default function App() {
                       key={comic.id} 
                       comic={comic} 
                       onBuy={handleBuyComic} 
+                      onUnlockComic={handleUnlockComic}
+                      userEmail={user?.email || 'mohamedadhilathika@gmail.com'}
                       hasDigitalAccess={!!activeRedeemedCode || comic.price === 0 || orders.some(o => o.comicId === comic.id && o.customerEmail === user?.email && o.status === 'Completed' && o.paymentStatus === 'Paid')}
                       onRead={handleReadComic}
                     />
@@ -1252,6 +1270,8 @@ export default function App() {
                     key={comic.id} 
                     comic={comic} 
                     onBuy={handleBuyComic} 
+                    onUnlockComic={handleUnlockComic}
+                    userEmail={user?.email || 'mohamedadhilathika@gmail.com'}
                     hasDigitalAccess={!!activeRedeemedCode || comic.price === 0 || orders.some(o => o.comicId === comic.id && o.customerEmail === user?.email && o.status === 'Completed' && o.paymentStatus === 'Paid')}
                     onRead={handleReadComic}
                   />

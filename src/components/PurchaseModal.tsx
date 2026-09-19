@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { X, ShieldCheck, Smartphone, Landmark, CheckCircle, Loader2, Sparkles, AlertCircle, ArrowLeft, Copy, Check, QrCode, RefreshCw, UploadCloud, Tag, Gift } from 'lucide-react';
 import { ComicVolume, DiscountCoupon, FreeComicCoupon, CouponRedemption } from '../types';
 import { supabase, saveCouponRedemption } from '../lib/supabase';
+import { verifyUpiPaymentScreenshot } from '../lib/tesseractOcr';
 
 interface PurchaseModalProps {
   comic: ComicVolume | null;
@@ -67,7 +68,7 @@ export default function PurchaseModal({ comic, isOpen, onClose, onOrderCreated, 
   const MERCHANT_UPI_ID = 'mohamedadhilathika@okhdfcbank';
 
   // Construct standard UPI deep link URI using finalPrice
-  const upiUri = `upi://pay?pa=${MERCHANT_UPI_ID}&pn=${encodeURIComponent('Omni Comic Universe')}&tn=${encodeURIComponent('OCU Vol 0' + comic.volumeNumber + ': ' + comic.title)}&am=${finalPrice}&cu=INR`;
+  const upiUri = `upi://pay?pa=${MERCHANT_UPI_ID}&pn=OmniComic&am=${finalPrice}&cu=INR&tn=OmniComicPayment`;
 
   const handleScreenshotFile = (file: File) => {
     setVerificationError('');
@@ -333,31 +334,23 @@ export default function PurchaseModal({ comic, isOpen, onClose, onOrderCreated, 
   };
 
   const handleVerifyPayment = async () => {
-    if (!screenshotBase64) {
-      setVerificationError('Please upload a transaction screenshot first.');
+    if (!screenshotFile && !screenshotBase64) {
+      setVerificationError('Waiting for payment... Please upload your payment screenshot here.');
       return;
     }
     setLoading(true);
     setVerificationError('');
 
     try {
-      const response = await fetch('/api/verify-payment', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          screenshot: screenshotBase64,
-          comicTitle: comic.title,
-          comicPrice: finalPrice, // Make sure we send the discounted price!
-          paymentStartTime: paymentStartTime,
-          recipientUpiId: MERCHANT_UPI_ID,
-        }),
-      });
+      // 1. Run Client-Side OCR Verification using Tesseract.js
+      const targetImg = screenshotFile || screenshotBase64;
+      const ocrResult = await verifyUpiPaymentScreenshot(
+        targetImg,
+        finalPrice,
+        MERCHANT_UPI_ID
+      );
 
-      const data = await response.json();
-
-      if (response.ok && data.success) {
+      if (ocrResult.success) {
         // Successful verification! Create order registry
         const orderId = `OCU-${Math.floor(100000 + Math.random() * 900000)}-TX`;
         setTxId(orderId);
@@ -383,6 +376,17 @@ export default function PurchaseModal({ comic, isOpen, onClose, onOrderCreated, 
           }
         }
 
+        // Mark comic as unlocked locally
+        try {
+          const stored = JSON.parse(localStorage.getItem('ocu_unlocked_comics') || '[]');
+          if (!stored.includes(comic.id)) {
+            stored.push(comic.id);
+            localStorage.setItem('ocu_unlocked_comics', JSON.stringify(stored));
+          }
+        } catch (storageErr) {
+          console.warn('Could not update localStorage unlocked comics:', storageErr);
+        }
+
         if (onOrderCreated) {
           onOrderCreated({
             id: orderId,
@@ -397,12 +401,11 @@ export default function PurchaseModal({ comic, isOpen, onClose, onOrderCreated, 
         }
         setStage('success');
       } else {
-        // Handle rejection or error from server
-        setVerificationError(data.reason || 'Payment could not be verified. Please make sure the screenshot shows a successful payment to mohamedadhilathika@okhdfcbank within 5 minutes.');
+        setVerificationError('Verification failed. Please ensure the UPI ID and exact amount are clearly visible in the screenshot.');
       }
     } catch (err: any) {
-      console.error('OCR Verification Request failed:', err);
-      setVerificationError('System is unable to process verification right now. Please verify your network connection and try again.');
+      console.error('OCR Verification failed:', err);
+      setVerificationError('Verification failed. Please ensure the UPI ID and exact amount are clearly visible in the screenshot.');
     } finally {
       setLoading(false);
     }
