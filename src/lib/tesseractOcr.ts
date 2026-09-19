@@ -139,7 +139,7 @@ export async function verifyUpiPaymentScreenshot(
         extractedText: rawText,
         matchedUpi,
         matchedPrice,
-        error: 'Verification failed. Please ensure the UPI ID and exact amount are clearly visible in the screenshot.'
+        error: 'Verification failed. Please ensure the UPI ID and exact amount are clearly visible.'
       };
     }
   } catch (err: any) {
@@ -149,7 +149,7 @@ export async function verifyUpiPaymentScreenshot(
       extractedText: '',
       matchedUpi: false,
       matchedPrice: false,
-      error: 'Verification failed. Please ensure the UPI ID and exact amount are clearly visible in the screenshot.'
+      error: 'Verification failed. Please ensure the UPI ID and exact amount are clearly visible.'
     };
   }
 }

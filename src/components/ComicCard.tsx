@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ShoppingCart, Calendar, Layers, BookOpen, Smartphone, UploadCloud, Loader2, CheckCircle, AlertCircle, X, ExternalLink } from 'lucide-react';
+import { Calendar, Layers, BookOpen, Smartphone, Loader2, CheckCircle, AlertCircle, X, ExternalLink, Lock } from 'lucide-react';
 import { ComicVolume, Order } from '../types';
 import { verifyUpiPaymentScreenshot } from '../lib/tesseractOcr';
 import { saveOrderInSupabase } from '../lib/supabase';
@@ -13,6 +13,7 @@ interface ComicCardProps {
   onRead?: (comic: ComicVolume) => void;
   onUnlockComic?: (comic: ComicVolume) => void | Promise<void>;
   userEmail?: string;
+  showToast?: (message: string, type?: 'success' | 'error' | 'info' | 'warning', title?: string) => void;
 }
 
 export default function ComicCard({ 
@@ -21,7 +22,8 @@ export default function ComicCard({
   hasDigitalAccess = false, 
   onRead,
   onUnlockComic,
-  userEmail = 'mohamedadhilathika@gmail.com'
+  userEmail = 'mohamedadhilathika@gmail.com',
+  showToast
 }: ComicCardProps) {
   const isReleased = comic.releaseStatus === 'Released';
 
@@ -45,7 +47,8 @@ export default function ComicCard({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const isUnlocked = hasDigitalAccess || isUnlockedLocally || comic.price === 0;
+  // Strict check: if price == 0 or explicitly unlocked
+  const isUnlocked = comic.price === 0 || hasDigitalAccess || isUnlockedLocally;
 
   // Clean up object URL on unmount
   useEffect(() => {
@@ -56,38 +59,20 @@ export default function ComicCard({
     };
   }, [previewUrl]);
 
-  const handleReadClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (e.nativeEvent) {
-      (e.nativeEvent as any).__comicReadHandled = true;
-    }
-    if (onRead) {
-      onRead(comic);
-    } else if (typeof (window as any).openComicReader === 'function') {
-      (window as any).openComicReader(comic);
-    } else if (typeof (window as any).viewComic === 'function') {
-      (window as any).viewComic(comic);
-    } else {
-      console.warn('[ComicCard] onRead, openComicReader, and viewComic are undefined for comic:', comic.id);
-    }
-  };
-
   /**
-   * 1. UPI Deep Link Integration:
-   * Generates and triggers the standard UPI intent link to open native UPI apps
+   * 2. UPI Deep Link on "PAY":
+   * Triggers the exact UPI deep link to open native payment apps
    */
-  const triggerUpiIntent = (comicPrice: number) => {
-    const upiLink = `upi://pay?pa=mohamedadhilathika@okhdfcbank&pn=OmniComic&am=${comicPrice}&cu=INR&tn=OmniComicPayment`;
-    console.log('[UPI Intent] Triggering deep link:', upiLink);
+  const triggerUpiIntent = (itemPrice: number) => {
+    const upiLink = `upi://pay?pa=mohamedadhilathika@okhdfcbank&pn=OmniComic&am=${itemPrice}&cu=INR`;
+    console.log('[UPI Intent] Triggering exact deep link:', upiLink);
 
-    // Trigger mobile device's app chooser dialog to open UPI apps natively (GPay, PhonePe, Paytm)
     try {
       window.location.href = upiLink;
     } catch (err) {
-      console.warn('[UPI Intent] Direct location assignment error:', err);
+      console.warn('[UPI Intent] Direct navigation error:', err);
     }
 
-    // Fallback anchor click to trigger mobile browser intent
     try {
       const a = document.createElement('a');
       a.href = upiLink;
@@ -105,15 +90,17 @@ export default function ComicCard({
   };
 
   /**
-   * Handle BUY button click
+   * Handle PAY button click
+   * 1. Trigger UPI deep link
+   * 2. Immediately replace button area with Verification UI
    */
-  const handleBuyClick = (e: React.MouseEvent) => {
+  const handlePayClick = (e: React.MouseEvent) => {
     e.stopPropagation();
 
-    // 1. Generate and trigger standard UPI deep link
+    // 1. Trigger exact UPI intent
     triggerUpiIntent(comic.price);
 
-    // 2. Immediately render payment verification section in place / below the button
+    // 2. Immediately show Verification UI
     setShowVerification(true);
     setVerificationError('');
     setSuccessMessage('');
@@ -121,6 +108,31 @@ export default function ComicCard({
     if (previewUrl) {
       URL.revokeObjectURL(previewUrl);
       setPreviewUrl('');
+    }
+  };
+
+  /**
+   * Handle READ NOW click:
+   * STRICT ACCESS CONTROL: Only allow reading if price == 0 or item IS unlocked!
+   */
+  const handleReadClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (comic.price > 0 && !isUnlocked) {
+      // Paywall bypass blocked! Trigger payment flow
+      handlePayClick(e);
+      return;
+    }
+
+    if (e.nativeEvent) {
+      (e.nativeEvent as any).__comicReadHandled = true;
+    }
+
+    if (onRead) {
+      onRead(comic);
+    } else if (typeof (window as any).openComicReader === 'function') {
+      (window as any).openComicReader(comic);
+    } else if (typeof (window as any).viewComic === 'function') {
+      (window as any).viewComic(comic);
     }
   };
 
@@ -141,7 +153,7 @@ export default function ComicCard({
   };
 
   /**
-   * 3. Client-Side OCR Verification (Tesseract.js) & 4. Validation Logic
+   * 4. Tesseract.js OCR Validation:
    */
   const handleVerifyPayment = async () => {
     if (!selectedFile) {
@@ -153,7 +165,6 @@ export default function ComicCard({
     setVerificationError('');
 
     try {
-      // Run Tesseract.js OCR verification against merchant UPI and comic price
       const result = await verifyUpiPaymentScreenshot(
         selectedFile,
         comic.price,
@@ -161,7 +172,7 @@ export default function ComicCard({
       );
 
       if (result.success) {
-        console.log('[Verification] UPI Payment screenshot verified successfully!');
+        console.log('[Verification] UPI Payment screenshot verified successfully for Comic:', comic.id);
 
         // 1. Mark comic as unlocked in local storage
         try {
@@ -174,7 +185,7 @@ export default function ComicCard({
           console.warn('Could not store unlocked comic in localStorage:', storageErr);
         }
 
-        // 2. Persist order in Supabase database
+        // 2. Persist order in Supabase
         const newOrder: Order = {
           id: `OCU-${Math.floor(100000 + Math.random() * 900000)}-UPI`,
           comicId: comic.id,
@@ -192,30 +203,29 @@ export default function ComicCard({
           console.error('Error saving order to Supabase:', dbErr);
         }
 
-        // 3. Notify parent component to update app-level state
+        // 3. Notify parent app
         if (onUnlockComic) {
           await onUnlockComic(comic);
         }
 
-        // 4. Update UI states: hide payment box, enable green READ NOW button, show success
+        // 4. Update UI: unlock item, hide verification UI, reveal green READ button
         setIsUnlockedLocally(true);
         setShowVerification(false);
         setSuccessMessage('Payment Verified! Comic Unlocked.');
 
-        // Auto-dismiss success message after 5 seconds
+        if (showToast) {
+          showToast(`Payment Verified! "${comic.title}" is now unlocked.`, 'success', 'Payment Successful');
+        }
+
         setTimeout(() => {
           setSuccessMessage('');
         }, 5000);
       } else {
-        // Verification failed
-        setVerificationError(
-          result.error ||
-          'Verification failed. Please ensure the UPI ID and exact amount are clearly visible in the screenshot.'
-        );
+        setVerificationError('Verification failed. Please ensure the UPI ID and exact amount are clearly visible.');
       }
     } catch (err: any) {
       console.error('[Verification Error]:', err);
-      setVerificationError('Verification failed. Please ensure the UPI ID and exact amount are clearly visible in the screenshot.');
+      setVerificationError('Verification failed. Please ensure the UPI ID and exact amount are clearly visible.');
     } finally {
       setIsVerifying(false);
     }
@@ -225,23 +235,22 @@ export default function ComicCard({
     <motion.article
       id={`comic-card-${comic.id}`}
       data-comic-id={comic.id}
-      data-comic-file={comic.digitalFile || ''}
+      data-comic-file={isUnlocked ? (comic.digitalFile || '') : ''}
       initial={{ opacity: 0, y: 30 }}
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, margin: '-50px' }}
       transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
       className="group relative flex flex-col h-full bg-ocu-graphite border border-white/10 rounded-xl overflow-hidden hover:border-white/20 transition-all duration-300 shadow-xl"
     >
-      {/* 1. Cover Placeholder Container with Cinematic 3D Spine & Glow Effect */}
+      {/* 1. Cover Container */}
       <div 
         onClick={handleReadClick}
-        title={`Click to read ${comic.title}`}
+        title={isUnlocked ? `Click to read ${comic.title}` : `Locked • Click to Pay ₹${comic.price}`}
         className="relative aspect-[3/4] w-full bg-neutral-950 overflow-hidden border-b border-white/10 flex items-center justify-center cursor-pointer group/cover"
       >
-        {/* Cover Placeholder image simulation using custom gradients */}
         <div className={`absolute inset-0 bg-gradient-to-br ${comic.coverGradient} transition-transform duration-700 group-hover:scale-105`} />
         
-        {/* Sleek book cover text details */}
+        {/* Cover metadata */}
         <div className="relative z-10 w-full h-full p-6 flex flex-col justify-between">
           <div className="flex items-center justify-between">
             <span className="font-mono text-[9px] font-bold tracking-widest text-ocu-gold bg-black/60 backdrop-blur-md px-2 py-1 rounded border border-white/5">
@@ -250,11 +259,9 @@ export default function ComicCard({
             <span className={`font-mono text-[9px] font-bold tracking-widest px-2 py-1 rounded border ${
               isUnlocked
                 ? 'text-emerald-400 bg-emerald-950/70 border-emerald-500/30'
-                : isReleased
-                ? 'text-emerald-400 bg-emerald-950/60 border-emerald-500/20'
-                : 'text-ocu-gold bg-yellow-950/60 border-ocu-gold/20'
+                : 'text-amber-400 bg-amber-950/70 border-amber-500/30'
             }`}>
-              {isUnlocked ? 'UNLOCKED' : comic.releaseStatus.toUpperCase()}
+              {isUnlocked ? 'UNLOCKED' : `LOCKED • ₹${comic.price}`}
             </span>
           </div>
 
@@ -271,21 +278,27 @@ export default function ComicCard({
           </div>
         </div>
 
-        {/* Hover quick-read prompt */}
+        {/* Hover Prompt: Open Reader (if unlocked) or Pay (if locked) */}
         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/cover:opacity-100 transition-opacity duration-300 flex items-center justify-center z-15 backdrop-blur-[2px]">
-          <span className="px-3.5 py-1.5 rounded-full bg-black/80 border border-ocu-gold/60 text-ocu-gold font-display text-[10px] font-bold tracking-widest uppercase flex items-center gap-1.5 shadow-lg">
-            <BookOpen size={12} />
-            <span>Open Reader</span>
-          </span>
+          {isUnlocked ? (
+            <span className="px-3.5 py-1.5 rounded-full bg-black/80 border border-emerald-400 text-emerald-300 font-display text-[10px] font-bold tracking-widest uppercase flex items-center gap-1.5 shadow-lg">
+              <BookOpen size={12} />
+              <span>Open Reader</span>
+            </span>
+          ) : (
+            <span className="px-3.5 py-1.5 rounded-full bg-black/80 border border-amber-400 text-amber-300 font-display text-[10px] font-bold tracking-widest uppercase flex items-center gap-1.5 shadow-lg">
+              <Lock size={12} />
+              <span>Pay ₹{comic.price} to Unlock</span>
+            </span>
+          )}
         </div>
 
-        {/* Cinematic ambient shadows & highlights of a printed cover */}
         <div className="absolute inset-y-0 left-0 w-[15px] bg-gradient-to-r from-black/40 via-transparent to-transparent z-10" />
         <div className="absolute inset-y-0 right-0 w-[4px] bg-white/5 z-10" />
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent z-0" />
       </div>
 
-      {/* 2. Comic Meta & Details */}
+      {/* 2. Details */}
       <div className="flex flex-col flex-grow p-6 text-left justify-between">
         <div>
           <div className="flex items-center gap-4 text-ocu-gray font-mono text-[11px] mb-3">
@@ -305,58 +318,56 @@ export default function ComicCard({
           </p>
         </div>
 
-        {/* Pricing & Checkout Controls */}
+        {/* 3. Strict Conditional Button & Verification Area */}
         <div className="pt-4 border-t border-white/5 flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex flex-col">
               <span className="font-mono text-[10px] tracking-widest text-ocu-gray uppercase">
                 {isUnlocked ? 'ACCESS' : 'PRICE'}
               </span>
               <span className={`font-display font-black text-xl ${isUnlocked ? 'text-emerald-400' : 'text-white'}`}>
-                {isUnlocked ? 'PURCHASED' : comic.price === 0 ? 'FREE' : `₹${comic.price}`}
+                {isUnlocked ? 'UNLOCKED' : comic.price === 0 ? 'FREE' : `₹${comic.price}`}
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
-              {/* 1. READ NOW BUTTON: When unlocked, enabled in vibrant green */}
-              <button
-                type="button"
-                id={`btn-read-comic-${comic.id}`}
-                data-action="read-comic"
-                data-comic-id={comic.id}
-                data-comic-file={comic.digitalFile || ''}
-                data-file-url={comic.digitalFile || ''}
-                onClick={handleReadClick}
-                className={`btn-read-now px-3.5 py-2.5 rounded font-display text-xs font-bold tracking-widest uppercase flex items-center gap-2 cursor-pointer transition-all active:scale-95 ${
-                  isUnlocked
-                    ? 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-lg shadow-emerald-500/25 border border-emerald-400'
-                    : 'bg-white/10 hover:bg-white/20 text-white border border-white/15 hover:border-ocu-gold/50'
-                }`}
-                title={isUnlocked ? 'Read Full Digital Comic (Unlocked)' : 'Read Digital Edition / Preview'}
-                aria-label={`Read ${comic.title} now`}
-              >
-                <BookOpen size={13} className={isUnlocked ? 'text-black' : 'text-ocu-gold'} />
-                <span>READ NOW</span>
-              </button>
-
-              {/* 2. BUY BUTTON: Only rendered when the comic is not yet unlocked and verification is not open */}
-              {!isUnlocked && !showVerification && (
-                <button
-                  type="button"
-                  id={`btn-buy-comic-${comic.id}`}
-                  onClick={handleBuyClick}
-                  className="group px-3.5 py-2.5 rounded bg-ocu-crimson hover:bg-rose-600 text-white border border-rose-500/40 hover:border-rose-400 transition-all duration-300 font-display text-xs font-bold tracking-widest uppercase flex items-center gap-1.5 cursor-pointer active:scale-95 shadow-md shadow-ocu-crimson/20"
-                  title={`Pay ₹${comic.price} via UPI & Unlock ${comic.title}`}
-                  aria-label={`Buy ${comic.title}`}
-                >
-                  <ShoppingCart size={13} className="text-white transition-colors" />
-                  <span>{isReleased ? 'BUY' : 'PRE-ORDER'}</span>
-                </button>
-              )}
-            </div>
+            {/* If NOT in verification mode, render exactly one button based on price and isUnlocked */}
+            {!showVerification && (
+              <div className="flex items-center gap-2">
+                {/* 1. If price == 0 or item IS unlocked: Render the normal green "READ NOW" button */}
+                {isUnlocked ? (
+                  <button
+                    type="button"
+                    id={`btn-read-comic-${comic.id}`}
+                    data-action="read-comic"
+                    data-comic-id={comic.id}
+                    data-comic-file={comic.digitalFile || ''}
+                    onClick={handleReadClick}
+                    className="btn-read-now px-4 py-2.5 rounded font-display text-xs font-bold tracking-widest uppercase flex items-center gap-2 cursor-pointer transition-all active:scale-95 bg-emerald-500 hover:bg-emerald-400 text-black shadow-lg shadow-emerald-500/25 border border-emerald-400"
+                    title={`Read ${comic.title}`}
+                    aria-label={`Read ${comic.title} now`}
+                  >
+                    <BookOpen size={14} className="text-black" />
+                    <span>READ NOW</span>
+                  </button>
+                ) : (
+                  /* 2. If price > 0 and NOT unlocked: Do NOT render READ button. Render "PAY ₹[Price]" button */
+                  <button
+                    type="button"
+                    id={`btn-pay-comic-${comic.id}`}
+                    onClick={handlePayClick}
+                    className="px-4 py-2.5 rounded bg-ocu-crimson hover:bg-rose-600 text-white border border-rose-500/40 hover:border-rose-400 transition-all duration-300 font-display text-xs font-bold tracking-widest uppercase flex items-center gap-2 cursor-pointer active:scale-95 shadow-md shadow-ocu-crimson/25"
+                    title={`Pay ₹${comic.price} via UPI to unlock`}
+                    aria-label={`Pay ₹${comic.price} to unlock ${comic.title}`}
+                  >
+                    <Lock size={13} className="text-white" />
+                    <span>PAY ₹{comic.price}</span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Success Banner */}
+          {/* Success Toast / Banner */}
           <AnimatePresence>
             {successMessage && (
               <motion.div
@@ -371,7 +382,7 @@ export default function ComicCard({
             )}
           </AnimatePresence>
 
-          {/* 2. Payment Verification Section */}
+          {/* 3. Screenshot Verification UI (Replaces button area when PAY clicked) */}
           <AnimatePresence>
             {!isUnlocked && showVerification && (
               <motion.div
@@ -385,7 +396,7 @@ export default function ComicCard({
                 <div className="flex items-center justify-between pb-1 border-b border-white/5">
                   <span className="font-mono text-[10px] uppercase font-bold text-ocu-gold flex items-center gap-1">
                     <Smartphone size={12} className="text-ocu-gold" />
-                    UPI Verification (₹{comic.price})
+                    UPI Payment: ₹{comic.price}
                   </span>
                   <button
                     type="button"
@@ -399,7 +410,7 @@ export default function ComicCard({
                       }
                     }}
                     className="text-white/40 hover:text-white text-xs p-1 transition-colors"
-                    title="Close verification"
+                    title="Cancel verification"
                   >
                     <X size={14} />
                   </button>
@@ -410,7 +421,7 @@ export default function ComicCard({
                   Waiting for payment... Please upload your payment screenshot here.
                 </p>
 
-                {/* Target Merchant Details */}
+                {/* Recipient details */}
                 <div className="p-2 bg-black/40 border border-white/5 rounded text-[11px] font-mono text-white/60 flex items-center justify-between">
                   <span>UPI ID: <strong className="text-white">mohamedadhilathika@okhdfcbank</strong></span>
                   <button
@@ -423,20 +434,20 @@ export default function ComicCard({
                   </button>
                 </div>
 
-                {/* Exact Required File Input */}
+                {/* Exact Required File Input with class payment-screenshot-input */}
                 <div className="relative">
                   <input
                     type="file"
                     accept="image/*"
                     id="payment-screenshot-input"
+                    className="payment-screenshot-input block w-full text-xs text-white/70 file:mr-2.5 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-mono file:font-semibold file:bg-white/10 file:text-white hover:file:bg-white/20 file:cursor-pointer cursor-pointer border border-white/10 rounded-md p-1.5 bg-black/40 focus:outline-none focus:border-ocu-gold/50"
                     ref={fileInputRef}
                     onChange={handleFileChange}
                     disabled={isVerifying}
-                    className="block w-full text-xs text-white/70 file:mr-2.5 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-mono file:font-semibold file:bg-white/10 file:text-white hover:file:bg-white/20 file:cursor-pointer cursor-pointer border border-white/10 rounded-md p-1.5 bg-black/40 focus:outline-none focus:border-ocu-gold/50"
                   />
                 </div>
 
-                {/* Screenshot Preview thumbnail */}
+                {/* Screenshot Preview */}
                 {previewUrl && (
                   <div className="relative w-full max-h-24 overflow-hidden rounded border border-white/10 bg-black flex items-center justify-center p-1">
                     <img 
@@ -447,7 +458,7 @@ export default function ComicCard({
                   </div>
                 )}
 
-                {/* Verification Error message */}
+                {/* Verification Error */}
                 {verificationError && (
                   <div className="flex items-start gap-1.5 text-xs text-rose-300 bg-rose-950/50 p-2.5 rounded border border-rose-800/50">
                     <AlertCircle size={14} className="shrink-0 mt-0.5 text-rose-400" />
@@ -466,7 +477,7 @@ export default function ComicCard({
                   {isVerifying ? (
                     <>
                       <Loader2 size={13} className="animate-spin text-white" />
-                      <span>Verifying payment... Please wait.</span>
+                      <span>Verifying payment...</span>
                     </>
                   ) : (
                     <>

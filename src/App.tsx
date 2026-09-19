@@ -52,6 +52,7 @@ import AdminPanel from './components/AdminPanel';
 import ComicReader from './components/ComicReader';
 import AdminLoginModal from './components/AdminLoginModal';
 import AcademyPdfReader from './components/AcademyPdfReader';
+import AcademyCard from './components/AcademyCard';
 
 export default function App() {
   const [view, setView] = useState<ViewState>('home');
@@ -225,6 +226,31 @@ export default function App() {
       targetComic.digitalFile = fileUrl;
     }
 
+    // Strict Paywall Access Control:
+    // If price > 0 and item is not unlocked, block direct access and do not render reader!
+    const isUnlocked = 
+      targetComic.price === 0 ||
+      Boolean(activeRedeemedCode) ||
+      orders.some(o => o.comicId === targetComic!.id && o.customerEmail === user?.email && o.status === 'Completed' && o.paymentStatus === 'Paid') ||
+      (() => {
+        try {
+          const stored = JSON.parse(localStorage.getItem('ocu_unlocked_comics') || '[]');
+          return Array.isArray(stored) && stored.includes(targetComic!.id);
+        } catch {
+          return false;
+        }
+      })();
+
+    if (targetComic.price > 0 && !isUnlocked) {
+      console.warn(`[Paywall Blocked] "${targetComic.title}" requires payment of ₹${targetComic.price}.`);
+      showToast(
+        `"${targetComic.title}" requires payment of ₹${targetComic.price}. Please click "PAY ₹${targetComic.price}" to unlock.`,
+        'warning',
+        'Material Locked'
+      );
+      return;
+    }
+
     // Error Handling: Fallback UI toast message and console log if comic file URL is missing or null
     const hasValidFile = Boolean(targetComic.digitalFile && targetComic.digitalFile.trim() !== '');
 
@@ -244,7 +270,7 @@ export default function App() {
     }
 
     setReadingComic(targetComic);
-  }, [comics, view, showToast]);
+  }, [comics, view, showToast, orders, user, activeRedeemedCode]);
 
   const viewComic = openComicReader;
   const handleReadComic = openComicReader;
@@ -652,6 +678,43 @@ export default function App() {
       paymentStatus: 'Paid'
     };
     await handleOrderCreated(newOrder);
+  };
+
+  const handleUnlockAcademyResource = async (resource: AcademyResource) => {
+    const customerEmail = user?.email || 'mohamedadhilathika@gmail.com';
+    const newOrder: Order = {
+      id: `OCU-${Math.floor(100000 + Math.random() * 900000)}-ACAD`,
+      comicId: resource.id,
+      comicTitle: resource.title,
+      customerEmail: customerEmail,
+      purchaseDate: new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
+      price: resource.priceINR,
+      status: 'Completed',
+      paymentStatus: 'Paid'
+    };
+    await handleOrderCreated(newOrder);
+  };
+
+  const isAcademyResourceUnlocked = (res: AcademyResource) => {
+    if (!res.priceINR || res.priceINR === 0 || res.tier !== 'paid') return true;
+    if (isAdminLoggedIn) return true;
+    try {
+      const stored = JSON.parse(localStorage.getItem('ocu_unlocked_academy') || '[]');
+      if (Array.isArray(stored) && stored.includes(res.id)) return true;
+    } catch {}
+    return orders.some(o => o.comicId === res.id && o.customerEmail === user?.email && o.status === 'Completed' && o.paymentStatus === 'Paid');
+  };
+
+  const handleReadAcademyResource = (res: AcademyResource) => {
+    if (!isAcademyResourceUnlocked(res)) {
+      showToast(
+        `"${res.title}" requires payment of ₹${res.priceINR}. Please click "PAY ₹${res.priceINR}" to unlock.`,
+        'warning',
+        'Material Locked'
+      );
+      return;
+    }
+    setReadingAcademyResource(res);
   };
 
   // Gift System Event Handlers
@@ -1076,6 +1139,7 @@ export default function App() {
                       userEmail={user?.email || 'mohamedadhilathika@gmail.com'}
                       hasDigitalAccess={!!activeRedeemedCode || comic.price === 0 || orders.some(o => o.comicId === comic.id && o.customerEmail === user?.email && o.status === 'Completed' && o.paymentStatus === 'Paid')}
                       onRead={handleReadComic}
+                      showToast={showToast}
                     />
                   ))}
                 </div>
@@ -1116,115 +1180,18 @@ export default function App() {
 
                 {/* Content Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                  {academyResources.map((item) => {
-                    const isPaid = item.tier === 'paid' && item.priceINR > 0;
-                    return (
-                      <div
-                        key={item.id}
-                        id={`academy-card-${item.id}`}
-                        className="bg-[#12121c] border border-white/10 hover:border-ocu-gold/40 rounded-xl p-7 flex flex-col justify-between transition-all duration-300 hover:-translate-y-1.5 shadow-[0_4px_24px_rgba(0,0,0,0.5)] hover:shadow-[0_12px_32px_rgba(251,191,36,0.12)] group relative overflow-hidden"
-                      >
-                        {/* Ambient corner glow */}
-                        <div className="absolute -top-16 -right-16 w-32 h-32 bg-ocu-crimson/10 rounded-full blur-2xl group-hover:bg-ocu-gold/15 transition-all duration-500 pointer-events-none" />
-
-                        <div className="space-y-5">
-                          {/* Card Badges: Stream/Category, Pricing Tier & Pages */}
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-[9px] tracking-wider text-ocu-gold font-bold uppercase bg-ocu-gold/10 border border-ocu-gold/20 px-2.5 py-1 rounded">
-                                {item.badge}
-                              </span>
-                              {isPaid ? (
-                                <span className="font-mono text-[10px] tracking-wider text-amber-400 font-bold uppercase bg-amber-950/60 border border-amber-500/30 px-2 py-0.5 rounded flex items-center gap-0.5 shadow-sm">
-                                  <span>₹{item.priceINR}</span>
-                                </span>
-                              ) : (
-                                <span className="font-mono text-[10px] tracking-wider text-emerald-400 font-bold uppercase bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded shadow-sm">
-                                  FREE
-                                </span>
-                              )}
-                            </div>
-                            <span className="font-mono text-[10px] text-white/40 flex items-center gap-1">
-                              <FileText size={12} />
-                              <span>{item.docPages || 40} Pages</span>
-                            </span>
-                          </div>
-
-                          <div>
-                            <p className="font-mono text-[10px] text-white/50 uppercase tracking-widest font-semibold mb-1">
-                              {item.stream}
-                            </p>
-                            <h3 className="font-display font-black text-xl text-white uppercase tracking-tight group-hover:text-ocu-gold transition-colors leading-snug">
-                              {item.title}
-                            </h3>
-                          </div>
-
-                          <p className="font-sans text-xs text-ocu-gray font-light leading-relaxed">
-                            {item.description}
-                          </p>
-
-                          {/* PDF Status Indicator */}
-                          {item.pdfUrl && (
-                            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-950/40 border border-emerald-500/20 text-emerald-400 text-[10px] font-mono">
-                              <Check size={12} className="flex-shrink-0" />
-                              <span className="truncate">PDF: {item.pdfFileName || 'Syllabus PDF Ready'}</span>
-                            </div>
-                          )}
-
-                          {item.features && item.features.length > 0 && (
-                            <div className="space-y-2 pt-3 border-t border-white/5">
-                              <span className="font-mono text-[9px] uppercase tracking-wider text-white/60 font-bold block">
-                                Key Revision Highlights:
-                              </span>
-                              <ul className="space-y-1.5 text-xs text-white/80 font-sans">
-                                {item.features.slice(0, 3).map((f, i) => (
-                                  <li key={i} className="flex items-start gap-2">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-ocu-crimson mt-1.5 flex-shrink-0 group-hover:bg-ocu-gold transition-colors" />
-                                    <span className="text-[11px] leading-tight text-white/70">{f}</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Card CTA Buttons */}
-                        <div className="pt-6 mt-6 border-t border-white/5 space-y-2.5">
-                          {/* Primary: Open Secure PDF Reader (Available for all students) */}
-                          <button
-                            id={`btn-read-academy-${item.id}`}
-                            onClick={() => setReadingAcademyResource(item)}
-                            className="w-full py-3 px-4 rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-black font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer shadow-md flex items-center justify-center gap-2 hover:shadow-lg"
-                          >
-                            <FileText size={14} />
-                            <span>Read Study Notes (PDF)</span>
-                          </button>
-
-                          {/* Admin-Only Quick Download Link */}
-                          {isAdminLoggedIn && item.pdfUrl && (
-                            <div className="pt-1 flex items-center justify-between text-[10px] font-mono text-emerald-400/90 px-1 border-t border-white/5 mt-1">
-                              <span className="flex items-center gap-1 text-white/50">
-                                <Lock size={10} className="text-amber-400" />
-                                <span>Admin Privilege</span>
-                              </span>
-                              <button
-                                onClick={() => {
-                                  const link = document.createElement('a');
-                                  link.href = item.pdfUrl!;
-                                  link.download = item.pdfFileName || `${item.id}-notes.pdf`;
-                                  link.click();
-                                }}
-                                className="text-emerald-400 hover:text-emerald-300 underline cursor-pointer flex items-center gap-1 font-bold"
-                              >
-                                <Download size={11} />
-                                <span>Download PDF</span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
+                  {academyResources.map((item) => (
+                    <AcademyCard
+                      key={item.id}
+                      item={item}
+                      isAdminLoggedIn={isAdminLoggedIn}
+                      isUnlockedGlobally={orders.some(o => o.comicId === item.id && o.customerEmail === user?.email && o.status === 'Completed' && o.paymentStatus === 'Paid')}
+                      onRead={handleReadAcademyResource}
+                      onUnlock={handleUnlockAcademyResource}
+                      userEmail={user?.email || 'mohamedadhilathika@gmail.com'}
+                      showToast={showToast}
+                    />
+                  ))}
                 </div>
               </section>
             </motion.div>
@@ -1274,6 +1241,7 @@ export default function App() {
                     userEmail={user?.email || 'mohamedadhilathika@gmail.com'}
                     hasDigitalAccess={!!activeRedeemedCode || comic.price === 0 || orders.some(o => o.comicId === comic.id && o.customerEmail === user?.email && o.status === 'Completed' && o.paymentStatus === 'Paid')}
                     onRead={handleReadComic}
+                    showToast={showToast}
                   />
                 ))}
               </div>
@@ -1479,18 +1447,41 @@ export default function App() {
                     <p className="text-[10px] text-emerald-400/80">Classroom DRM Protected Academic Reader</p>
                   </div>
                 </div>
-                <button
-                  id="btn-modal-open-reader"
-                  onClick={() => {
-                    const res = selectedAcademyResource;
-                    setSelectedAcademyResource(null);
-                    setReadingAcademyResource(res);
-                  }}
-                  className="px-3 py-1.5 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors flex-shrink-0"
-                >
-                  <BookOpen size={12} />
-                  <span>Open Reader</span>
-                </button>
+                {isAcademyResourceUnlocked(selectedAcademyResource) ? (
+                  <button
+                    id="btn-modal-open-reader"
+                    onClick={() => {
+                      const res = selectedAcademyResource;
+                      setSelectedAcademyResource(null);
+                      setReadingAcademyResource(res);
+                    }}
+                    className="px-3 py-1.5 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors flex-shrink-0"
+                  >
+                    <BookOpen size={12} />
+                    <span>Open Reader</span>
+                  </button>
+                ) : (
+                  <button
+                    id="btn-modal-open-reader"
+                    onClick={() => {
+                      const res = selectedAcademyResource;
+                      const price = res.priceINR;
+                      window.location.href = `upi://pay?pa=mohamedadhilathika@okhdfcbank&pn=OmniComic&am=${price}&cu=INR`;
+                      setSelectedAcademyResource(null);
+                      setTimeout(() => {
+                        const payBtn = document.getElementById(`btn-pay-academy-${res.id}`);
+                        if (payBtn) {
+                          payBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          payBtn.click();
+                        }
+                      }, 300);
+                    }}
+                    className="px-3 py-1.5 rounded bg-ocu-crimson hover:bg-rose-600 text-white font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors flex-shrink-0"
+                  >
+                    <Lock size={12} />
+                    <span>PAY ₹{selectedAcademyResource.priceINR}</span>
+                  </button>
+                )}
               </div>
 
               {/* Units & Syllabus Breakdown */}
@@ -1537,18 +1528,41 @@ export default function App() {
                     : 'FREE DIGITAL REVISION ASSET • ACCREDITED'}
                 </div>
                 <div className="flex items-center gap-3 w-full sm:w-auto">
-                  <button
-                    id="btn-open-academy-reader-from-modal"
-                    onClick={() => {
-                      const res = selectedAcademyResource;
-                      setSelectedAcademyResource(null);
-                      setReadingAcademyResource(res);
-                    }}
-                    className="flex-1 sm:flex-none px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-black font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer flex items-center justify-center gap-2 shadow-lg"
-                  >
-                    <BookOpen size={14} />
-                    <span>Open in Secure Reader</span>
-                  </button>
+                  {isAcademyResourceUnlocked(selectedAcademyResource) ? (
+                    <button
+                      id="btn-open-academy-reader-from-modal"
+                      onClick={() => {
+                        const res = selectedAcademyResource;
+                        setSelectedAcademyResource(null);
+                        setReadingAcademyResource(res);
+                      }}
+                      className="flex-1 sm:flex-none px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-black font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer flex items-center justify-center gap-2 shadow-lg"
+                    >
+                      <BookOpen size={14} />
+                      <span>Open in Secure Reader</span>
+                    </button>
+                  ) : (
+                    <button
+                      id="btn-modal-pay-academy"
+                      onClick={() => {
+                        const res = selectedAcademyResource;
+                        const price = res.priceINR;
+                        window.location.href = `upi://pay?pa=mohamedadhilathika@okhdfcbank&pn=OmniComic&am=${price}&cu=INR`;
+                        setSelectedAcademyResource(null);
+                        setTimeout(() => {
+                          const payBtn = document.getElementById(`btn-pay-academy-${res.id}`);
+                          if (payBtn) {
+                            payBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            payBtn.click();
+                          }
+                        }, 300);
+                      }}
+                      className="flex-1 sm:flex-none px-5 py-2.5 bg-ocu-crimson hover:bg-rose-600 text-white font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer flex items-center justify-center gap-2 shadow-lg"
+                    >
+                      <Lock size={14} />
+                      <span>PAY ₹{selectedAcademyResource.priceINR}</span>
+                    </button>
+                  )}
 
                   {/* Admin-Only Direct Download Button */}
                   {isAdminLoggedIn && selectedAcademyResource.pdfUrl && (
