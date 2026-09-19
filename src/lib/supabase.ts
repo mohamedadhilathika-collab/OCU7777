@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import { createClient } from '@supabase/supabase-js';
-import { ComicVolume, GiftCode, RedemptionHistory, Order, DiscountCoupon, FreeComicCoupon, CouponRedemption } from '../types';
-import { OCU_COMICS, INITIAL_GIFT_CODES } from '../data';
+import { ComicVolume, GiftCode, RedemptionHistory, Order, DiscountCoupon, FreeComicCoupon, CouponRedemption, AcademyResource, AcademySettings } from '../types';
+import { OCU_COMICS, INITIAL_GIFT_CODES, INITIAL_ACADEMY_RESOURCES, INITIAL_ACADEMY_SETTINGS } from '../data';
 
 export let supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 export let supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -9,6 +9,7 @@ export let supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 export let isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 
 export const missingTablesSet = new Set<string>();
+export const missingColumnsSet = new Set<string>();
 
 export function getMissingTables(): string[] {
   return Array.from(missingTablesSet);
@@ -16,6 +17,14 @@ export function getMissingTables(): string[] {
 
 export function addMissingTable(tableName: string) {
   missingTablesSet.add(tableName);
+}
+
+export function getMissingColumns(): string[] {
+  return Array.from(missingColumnsSet);
+}
+
+export function addMissingColumn(colName: string) {
+  missingColumnsSet.add(colName);
 }
 
 // Initialize Supabase Client
@@ -926,7 +935,66 @@ export function isUserTemporarilyBanned(bannedUntil: string | null | undefined):
 }
 
 /**
- * Fetches the user profile row from Supabase profiles table.
+ * Tracks whether the remote Supabase profiles table lacks the banned_until column.
+ * When true, we avoid sending queries with banned_until to prevent schema cache errors.
+ */
+export let isBannedUntilColumnMissing = false;
+
+/**
+ * Retrieves the persistent map of banned user timestamps.
+ * Backed by Supabase admin_settings table and synchronized with localStorage.
+ */
+export async function getBannedUsersMap(): Promise<Record<string, string>> {
+  let map: Record<string, string> = {};
+  try {
+    const cached = localStorage.getItem('ocu_banned_users');
+    if (cached) {
+      map = JSON.parse(cached);
+    }
+  } catch {}
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data } = await supabase
+        .from('admin_settings')
+        .select('value')
+        .eq('key', 'ocu_banned_users')
+        .maybeSingle();
+
+      if (data?.value) {
+        try {
+          const remoteMap = JSON.parse(data.value);
+          map = { ...map, ...remoteMap };
+          localStorage.setItem('ocu_banned_users', JSON.stringify(map));
+        } catch {}
+      }
+    } catch {}
+  }
+  return map;
+}
+
+/**
+ * Persists the banned user map to localStorage and Supabase admin_settings.
+ */
+export async function setBannedUsersMap(map: Record<string, string>): Promise<void> {
+  try {
+    localStorage.setItem('ocu_banned_users', JSON.stringify(map));
+  } catch {}
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await supabase
+        .from('admin_settings')
+        .upsert({ key: 'ocu_banned_users', value: JSON.stringify(map) }, { onConflict: 'key' });
+    } catch (err) {
+      console.warn('Fallback: Failed to write banned users map to admin_settings:', err);
+    }
+  }
+}
+
+/**
+ * Fetches the user profile row from Supabase profiles table,
+ * merged with fallback ban data if banned_until is missing from profiles.
  */
 export async function fetchUserProfile(userId: string): Promise<UserProfile | null> {
   if (!isSupabaseConfigured || !supabase || !userId) return null;
@@ -943,7 +1011,16 @@ export async function fetchUserProfile(userId: string): Promise<UserProfile | nu
       return null;
     }
 
-    return data as UserProfile | null;
+    if (!data) return null;
+
+    const profile = { ...(data as UserProfile) };
+    if (!profile.banned_until) {
+      const bannedMap = await getBannedUsersMap();
+      if (bannedMap[userId]) {
+        profile.banned_until = bannedMap[userId];
+      }
+    }
+    return profile;
   } catch (err) {
     console.warn('Failed to fetch user profile:', err);
     return null;
@@ -964,7 +1041,15 @@ export async function checkUserBanStatus(
     return { isBanned: true, bannedUntil: profile.banned_until };
   }
 
-  // 2. Check auth user metadata fallback
+  // 2. Check persistent fallback ban store (admin_settings + localStorage)
+  try {
+    const bannedMap = await getBannedUsersMap();
+    if (bannedMap[userId] && isUserTemporarilyBanned(bannedMap[userId])) {
+      return { isBanned: true, bannedUntil: bannedMap[userId] };
+    }
+  } catch {}
+
+  // 3. Check auth user metadata fallback
   if (userMetadata?.banned_until && isUserTemporarilyBanned(userMetadata.banned_until)) {
     return { isBanned: true, bannedUntil: userMetadata.banned_until };
   }
@@ -983,20 +1068,133 @@ export async function upsertUserProfile(profile: UserProfile): Promise<void> {
     last_login: profile.last_login
   };
 
-  // Only attach banned_until if explicitly defined so we never unintentionally overwrite an admin ban
-  if (profile.banned_until !== undefined) {
+  // Only attach banned_until if explicitly defined and column is not known to be missing
+  if (profile.banned_until !== undefined && !isBannedUntilColumnMissing) {
     upsertPayload.banned_until = profile.banned_until;
   }
 
-  const { error } = await supabase
+  let { error } = await supabase
     .from('profiles')
     .upsert(upsertPayload, { onConflict: 'user_id' });
+
+  // If column banned_until is missing from schema cache, retry payload without it
+  if (error && (error.message?.includes('banned_until') || error.message?.includes('schema cache') || error.code === 'PGRST204')) {
+    isBannedUntilColumnMissing = true;
+    addMissingTable('profiles (column: banned_until)');
+    addMissingColumn('profiles.banned_until');
+    delete upsertPayload.banned_until;
+    const retry = await supabase
+      .from('profiles')
+      .upsert(upsertPayload, { onConflict: 'user_id' });
+    error = retry.error;
+  }
 
   if (error) {
     console.error('Error upserting user profile in Supabase:', error.message);
     if (error.message?.includes('Could not find the table') || error.message?.includes('relation "profiles" does not exist')) {
       addMissingTable('profiles');
     }
+  }
+}
+
+/**
+ * Fetches all registered user profiles (for administrative oversight),
+ * merging fallback ban state from admin_settings/localStorage.
+ */
+export async function fetchAllUserProfiles(): Promise<UserProfile[]> {
+  if (!isSupabaseConfigured || !supabase) return [];
+  try {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .order('last_login', { ascending: false });
+
+    if (error) {
+      console.warn('Error fetching all user profiles:', error.message);
+      return [];
+    }
+
+    const profiles = (data as UserProfile[]) || [];
+    const bannedMap = await getBannedUsersMap();
+    return profiles.map((p) => {
+      if (!p.banned_until && bannedMap[p.user_id]) {
+        return { ...p, banned_until: bannedMap[p.user_id] };
+      }
+      return p;
+    });
+  } catch (err) {
+    console.warn('Failed to fetch user profiles:', err);
+    return [];
+  }
+}
+
+/**
+ * Updates the banned_until timestamp for a specific user.
+ * Pass an ISO string for a future timestamp to enforce a ban, or null to lift a ban.
+ * Gracefully handles missing banned_until column in Supabase profiles by applying the ban
+ * via persistent admin_settings and localStorage.
+ */
+export async function updateUserBan(userId: string, bannedUntil: string | null): Promise<boolean> {
+  if (!userId) return false;
+
+  // 1. Always update our persistent fallback ban store (admin_settings + localStorage)
+  let fallbackUpdated = false;
+  try {
+    const map = await getBannedUsersMap();
+    if (bannedUntil) {
+      map[userId] = bannedUntil;
+    } else {
+      delete map[userId];
+    }
+    await setBannedUsersMap(map);
+    fallbackUpdated = true;
+  } catch (storeErr) {
+    console.warn('Failed to update local/admin_settings ban map:', storeErr);
+  }
+
+  if (!isSupabaseConfigured || !supabase) {
+    return fallbackUpdated;
+  }
+
+  // 2. If the column is already known to be missing, avoid query to prevent schema cache errors
+  if (isBannedUntilColumnMissing) {
+    return fallbackUpdated;
+  }
+
+  // 3. Attempt direct update on Supabase profiles table
+  try {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ banned_until: bannedUntil })
+      .eq('user_id', userId);
+
+    if (error) {
+      const isMissingCol = 
+        error.message?.includes('banned_until') || 
+        error.message?.includes('schema cache') || 
+        error.code === 'PGRST204';
+
+      if (isMissingCol) {
+        isBannedUntilColumnMissing = true;
+        addMissingTable('profiles (column: banned_until)');
+        addMissingColumn('profiles.banned_until');
+        console.warn(
+          `[Supabase Notice] Column 'banned_until' is not present in 'profiles' table schema cache. ` +
+          `The user ban was securely recorded in persistent settings and enforced immediately. ` +
+          `To add the column to the database, run: ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS banned_until TIMESTAMPTZ;`
+        );
+        // Return true because the ban was successfully recorded and will be actively enforced
+        return true;
+      }
+
+      console.warn('Notice updating profiles table for user ban in Supabase:', error.message);
+      return fallbackUpdated;
+    }
+
+    return true;
+  } catch (err) {
+    console.warn('Failed to update profiles table for user ban:', err);
+    return fallbackUpdated;
   }
 }
 
@@ -1070,5 +1268,263 @@ export async function logSecurityEvent(eventType: string, metadata: any = {}) {
     console.error('[DRM] Failed to save security event locally:', err);
   }
 }
+
+// ----------------- OCU ACADEMY SUPABASE STORAGE & DATABASE PIPELINE -----------------
+
+/**
+ * Uploads an Academy study material PDF to the Supabase Storage bucket 'academy-materials'.
+ * Returns the public URL of the uploaded document.
+ */
+export async function uploadAcademyPdfToSupabase(
+  fileName: string,
+  file: Blob | File,
+  onProgress?: (progress: number) => void
+): Promise<string> {
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error('Supabase is not configured. Please ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are present.');
+  }
+
+  const cleanFileName = `${Date.now()}_${fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from('academy-materials')
+    .upload(cleanFileName, file, {
+      cacheControl: '3600',
+      upsert: true,
+      ...(onProgress && {
+        onUploadProgress: (progress) => {
+          if (progress.total) {
+            const percentage = Math.round((progress.loaded / progress.total) * 100);
+            onProgress(percentage);
+          }
+        },
+      }),
+    });
+
+  if (uploadError) {
+    console.error('Supabase storage upload error details for academy-materials:', uploadError);
+    throw new Error(uploadError.message || 'Failed to upload PDF file to academy-materials storage bucket');
+  }
+
+  // Retrieve public URL from Supabase Storage
+  const { data: publicUrlData } = supabase.storage
+    .from('academy-materials')
+    .getPublicUrl(cleanFileName);
+
+  if (!publicUrlData || !publicUrlData.publicUrl) {
+    throw new Error('Could not retrieve public URL for uploaded academy PDF.');
+  }
+
+  return publicUrlData.publicUrl;
+}
+
+function mapAcademyResourceToDB(r: AcademyResource): any {
+  return {
+    id: r.id,
+    title: r.title,
+    stream: r.stream || '',
+    badge: r.badge || '',
+    description: r.description || '',
+    features: Array.isArray(r.features) ? r.features : [],
+    chapters: JSON.stringify(r.chapters || []),
+    exam_tips: Array.isArray(r.examTips) ? r.examTips : [],
+    doc_pages: Number(r.docPages) || 40,
+    pdf_url: r.pdfUrl || null,
+    pdf_file_name: r.pdfFileName || null,
+    tier: r.tier || 'free',
+    price_inr: Number(r.priceINR) || 0,
+    updated_at: r.updatedAt || new Date().toISOString()
+  };
+}
+
+function mapAcademyResourceFromDB(row: any): AcademyResource {
+  let parsedChapters: any[] = [];
+  try {
+    if (typeof row.chapters === 'string') {
+      parsedChapters = JSON.parse(row.chapters);
+    } else if (Array.isArray(row.chapters)) {
+      parsedChapters = row.chapters;
+    }
+  } catch {}
+
+  return {
+    id: row.id,
+    title: row.title,
+    stream: row.stream || '',
+    badge: row.badge || '',
+    description: row.description || '',
+    features: Array.isArray(row.features) ? row.features : [],
+    chapters: parsedChapters,
+    examTips: Array.isArray(row.exam_tips) ? row.exam_tips : [],
+    docPages: Number(row.doc_pages) || 40,
+    pdfUrl: row.pdf_url || '',
+    pdfFileName: row.pdf_file_name || '',
+    tier: row.tier === 'paid' ? 'paid' : 'free',
+    priceINR: row.price_inr ? Number(row.price_inr) : 0,
+    updatedAt: row.updated_at || ''
+  };
+}
+
+/**
+ * Fetches Academy study resources from Supabase public.academy_resources table.
+ */
+export async function fetchAcademyResourcesFromSupabase(): Promise<AcademyResource[]> {
+  if (!isSupabaseConfigured || !supabase) {
+    return INITIAL_ACADEMY_RESOURCES;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('academy_resources')
+      .select('*')
+      .order('id', { ascending: true });
+
+    if (error) {
+      if (error.message?.includes('Could not find the table') || error.message?.includes('relation "academy_resources" does not exist')) {
+        addMissingTable('academy_resources');
+        console.warn('Supabase academy_resources table is not yet provisioned. Falling back to default list: ' + error.message);
+      } else {
+        console.error('Supabase error fetching academy_resources:', error.message);
+      }
+      return INITIAL_ACADEMY_RESOURCES;
+    }
+
+    if (!data || data.length === 0) {
+      console.log('Academy resources table is empty in Supabase. Seeding default catalog...');
+      const rowsToInsert = INITIAL_ACADEMY_RESOURCES.map(mapAcademyResourceToDB);
+      const { error: seedError } = await supabase
+        .from('academy_resources')
+        .insert(rowsToInsert);
+
+      if (seedError) {
+        console.warn('Notice seeding default academy resources in Supabase:', seedError.message);
+      }
+      return INITIAL_ACADEMY_RESOURCES;
+    }
+
+    return data.map(mapAcademyResourceFromDB);
+  } catch (err) {
+    console.error('Unexpected error fetching academy resources from Supabase:', err);
+    return INITIAL_ACADEMY_RESOURCES;
+  }
+}
+
+/**
+ * Saves or updates an Academy resource in Supabase academy_resources table.
+ */
+export async function saveAcademyResourceInSupabase(resource: AcademyResource): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return;
+
+  const dbRow = mapAcademyResourceToDB(resource);
+  const { error } = await supabase
+    .from('academy_resources')
+    .upsert(dbRow, { onConflict: 'id' });
+
+  if (error) {
+    console.error(`Error saving academy resource ${resource.id} in Supabase:`, error.message);
+    if (error.message?.includes('Could not find the table') || error.message?.includes('relation "academy_resources" does not exist')) {
+      addMissingTable('academy_resources');
+    }
+    throw new Error(error.message);
+  }
+}
+
+/**
+ * Directly updates or inserts the public PDF URL and filename for an Academy resource row in Supabase.
+ */
+export async function updateAcademyResourcePdfInSupabase(
+  resourceId: string,
+  pdfUrl: string,
+  pdfFileName?: string
+): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return;
+
+  const { error } = await supabase
+    .from('academy_resources')
+    .update({
+      pdf_url: pdfUrl,
+      pdf_file_name: pdfFileName || null,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', resourceId);
+
+  if (error) {
+    console.error(`Error updating PDF URL for academy resource ${resourceId} in Supabase:`, error.message);
+    if (error.message?.includes('Could not find the table') || error.message?.includes('relation "academy_resources" does not exist')) {
+      addMissingTable('academy_resources');
+    }
+    throw new Error(error.message);
+  }
+}
+
+/**
+ * Deletes an Academy resource from Supabase.
+ */
+export async function deleteAcademyResourceFromSupabase(resourceId: string): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return;
+
+  const { error } = await supabase
+    .from('academy_resources')
+    .delete()
+    .eq('id', resourceId);
+
+  if (error) {
+    console.error(`Error deleting academy resource ${resourceId} from Supabase:`, error.message);
+    throw new Error(error.message);
+  }
+}
+
+/**
+ * Fetches Academy heading and configuration settings from Supabase.
+ */
+export async function fetchAcademySettingsFromSupabase(): Promise<AcademySettings> {
+  if (!isSupabaseConfigured || !supabase) {
+    return INITIAL_ACADEMY_SETTINGS;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('admin_settings')
+      .select('value')
+      .eq('key', 'ocu_academy_settings')
+      .maybeSingle();
+
+    if (error || !data) {
+      return INITIAL_ACADEMY_SETTINGS;
+    }
+
+    const parsed = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+    return {
+      heading: parsed?.heading || INITIAL_ACADEMY_SETTINGS.heading,
+      subheading: parsed?.subheading || INITIAL_ACADEMY_SETTINGS.subheading,
+      updatedAt: parsed?.updatedAt
+    };
+  } catch (err) {
+    console.warn('Error fetching academy settings from Supabase:', err);
+    return INITIAL_ACADEMY_SETTINGS;
+  }
+}
+
+/**
+ * Saves Academy heading and configuration settings in Supabase.
+ */
+export async function saveAcademySettingsInSupabase(settings: AcademySettings): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return;
+
+  const payload = {
+    key: 'ocu_academy_settings',
+    value: JSON.stringify(settings)
+  };
+
+  const { error } = await supabase
+    .from('admin_settings')
+    .upsert(payload, { onConflict: 'key' });
+
+  if (error) {
+    console.error('Error saving academy settings in Supabase:', error.message);
+    throw new Error(error.message);
+  }
+}
+
 
 

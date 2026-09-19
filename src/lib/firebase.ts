@@ -34,14 +34,14 @@ const firebaseConfig = {
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
 
-// Configure Firestore log verbosity to prevent noisy transient connection retry logs
-setLogLevel('error');
+// Configure Firestore log verbosity to silent to prevent noisy transient connection retry logs
+setLogLevel('silent');
 
-// Initialize Firestore with robust long-polling and custom Database ID
+// Initialize Firestore with robust auto-detect long-polling and custom Database ID
 export const db = initializeFirestore(
   app, 
   {
-    experimentalForceLongPolling: true
+    experimentalAutoDetectLongPolling: true
   },
   "ai-studio-ocuofficialwebsi-fca0c4b4-61fc-46bb-a841-72a304c24442"
 );

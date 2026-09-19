@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   ShieldAlert, BookOpen, Compass, ShoppingCart, 
-  Tv, Volume2, VolumeX, Sparkles, AlertCircle, HelpCircle, ArrowUpRight, Check, Star, Lock,
+  Tv, Volume2, VolumeX, Sparkles, AlertCircle, AlertTriangle, HelpCircle, ArrowUpRight, Check, Star, Lock,
   GraduationCap, FileText, Calculator, Download, X, IndianRupee
 } from 'lucide-react';
 import { ViewState, ComicVolume, GiftCode, RedemptionHistory, Order, DiscountCoupon, FreeComicCoupon, CouponRedemption, AcademyResource } from './types';
@@ -28,7 +28,14 @@ import {
   fetchFreeComicCoupons,
   fetchCouponRedemptions,
   upsertUserProfile,
-  UserProfile
+  UserProfile,
+  checkUserBanStatus,
+  isUserTemporarilyBanned,
+  fetchAcademyResourcesFromSupabase,
+  fetchAcademySettingsFromSupabase,
+  saveAcademyResourceInSupabase,
+  saveAcademySettingsInSupabase,
+  deleteAcademyResourceFromSupabase
 } from './lib/supabase';
 import {
   fetchAcademyResources,
@@ -44,10 +51,12 @@ import GiftCodeRedeemer from './components/GiftCodeRedeemer';
 import AdminPanel from './components/AdminPanel';
 import ComicReader from './components/ComicReader';
 import AdminLoginModal from './components/AdminLoginModal';
+import AcademyPdfReader from './components/AcademyPdfReader';
 
 export default function App() {
   const [view, setView] = useState<ViewState>('home');
   const [selectedAcademyResource, setSelectedAcademyResource] = useState<AcademyResource | null>(null);
+  const [readingAcademyResource, setReadingAcademyResource] = useState<AcademyResource | null>(null);
   const [downloadNotification, setDownloadNotification] = useState<string | null>(null);
 
   // Dynamic Academy Management States
@@ -84,6 +93,8 @@ export default function App() {
     sessionStorage.removeItem('ocu_admin_logged_in');
     sessionStorage.removeItem('isAdmin');
     sessionStorage.removeItem('admin');
+    window.dispatchEvent(new Event('storage'));
+    window.dispatchEvent(new CustomEvent('ocu-admin-auth-change', { detail: { isAdmin: false } }));
   }, []);
 
   const [adminAccessCode, setAdminAccessCode] = useState<string>(() => {
@@ -99,6 +110,7 @@ export default function App() {
   const [isGuest, setIsGuest] = useState<boolean>(() => {
     return localStorage.getItem('ocu_guest_mode') === 'true';
   });
+  const [banError, setBanError] = useState<string | null>(null);
 
   // Synchronized Comics Catalog & Purchase Registries
   const [comics, setComics] = useState<ComicVolume[]>([]);
@@ -153,6 +165,23 @@ export default function App() {
   const [readingComic, setReadingComic] = useState<ComicVolume | null>(null);
   const [lastComicsScrollPos, setLastComicsScrollPos] = useState<number>(0);
 
+  // Toast feedback and missing file fallback alerts
+  interface ToastNotice {
+    id: string;
+    message: string;
+    type: 'info' | 'warning' | 'error' | 'success';
+    title?: string;
+  }
+  const [toastNotice, setToastNotice] = useState<ToastNotice | null>(null);
+
+  const showToast = useCallback((message: string, type: 'info' | 'warning' | 'error' | 'success' = 'info', title?: string) => {
+    const id = Date.now().toString() + Math.random().toString(36).substring(2, 6);
+    setToastNotice({ id, message, type, title });
+    setTimeout(() => {
+      setToastNotice(prev => (prev?.id === id ? null : prev));
+    }, 5000);
+  }, []);
+
   // Track scroll position on the Comics Catalog view
   useEffect(() => {
     const handleScroll = () => {
@@ -164,12 +193,94 @@ export default function App() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, [view, readingComic]);
 
-  const handleReadComic = (comic: ComicVolume) => {
+  // Function Implementation: openComicReader & viewComic for interactive reading and external triggers
+  const openComicReader = useCallback((comicOrId: ComicVolume | string, fileUrl?: string) => {
+    let targetComic: ComicVolume | undefined;
+
+    if (typeof comicOrId === 'string') {
+      const trimmedId = comicOrId.trim();
+      targetComic = comics.find(c => c.id === trimmedId) || OCU_COMICS.find(c => c.id === trimmedId);
+      if (!targetComic) {
+        targetComic = {
+          id: trimmedId,
+          volumeNumber: 1,
+          title: trimmedId.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+          releaseStatus: 'Released',
+          shortDescription: 'Digital edition reader preview.',
+          longDescription: 'Digital edition reader preview.',
+          price: 0,
+          pages: 48,
+          writer: 'Omni Comic Universe',
+          artist: 'OCU Studios',
+          coverGradient: 'from-blue-950 to-black',
+          releaseDate: '2026',
+          digitalFile: fileUrl || ''
+        };
+      }
+    } else {
+      targetComic = { ...comicOrId };
+    }
+
+    if (fileUrl && (!targetComic.digitalFile || targetComic.digitalFile.trim() === '')) {
+      targetComic.digitalFile = fileUrl;
+    }
+
+    // Error Handling: Fallback UI toast message and console log if comic file URL is missing or null
+    const hasValidFile = Boolean(targetComic.digitalFile && targetComic.digitalFile.trim() !== '');
+
+    if (!hasValidFile) {
+      console.warn(`[Comic Reader] Comic file URL is missing or null for comic ID: "${targetComic.id}", Title: "${targetComic.title}". Loading interactive preview simulation.`);
+      showToast(
+        `Digital comic file URL is missing or pending upload for "${targetComic.title}". Launching interactive reader preview...`,
+        'warning',
+        'Comic File Notice'
+      );
+    } else {
+      console.log(`[Comic Reader] Loading associated comic file into viewer interface for "${targetComic.title}":`, targetComic.digitalFile);
+    }
+
     if (view === 'comics') {
       setLastComicsScrollPos(window.scrollY);
     }
-    setReadingComic(comic);
-  };
+
+    setReadingComic(targetComic);
+  }, [comics, view, showToast]);
+
+  const viewComic = openComicReader;
+  const handleReadComic = openComicReader;
+
+  // Dynamic Rendering Support: Attach globally to window and set up delegated click event listener
+  useEffect(() => {
+    (window as any).openComicReader = openComicReader;
+    (window as any).viewComic = viewComic;
+
+    const handleDelegatedReadClick = (e: MouseEvent) => {
+      const target = (e.target as HTMLElement)?.closest(
+        '[data-action="read-comic"], [id^="btn-read-comic-"], .btn-read-now'
+      ) as HTMLElement | null;
+
+      if (!target) return;
+
+      if ((e as any).__comicReadHandled) return;
+      (e as any).__comicReadHandled = true;
+
+      const comicId = target.getAttribute('data-comic-id') || target.id?.replace('btn-read-comic-', '');
+      const fileUrl = target.getAttribute('data-comic-file') || target.getAttribute('data-file-url') || undefined;
+
+      console.log('[Delegated Click] "READ NOW" clicked for comic ID:', comicId, 'File URL:', fileUrl);
+
+      if (comicId) {
+        openComicReader(comicId, fileUrl || undefined);
+      }
+    };
+
+    document.addEventListener('click', handleDelegatedReadClick, true);
+    return () => {
+      document.removeEventListener('click', handleDelegatedReadClick, true);
+      delete (window as any).openComicReader;
+      delete (window as any).viewComic;
+    };
+  }, [openComicReader, viewComic]);
 
   // Load live, device-synced data from Supabase on mount and listen to realtime updates
   const loadSupabaseData = useCallback(async () => {
@@ -232,12 +343,12 @@ export default function App() {
     }
   }, []);
 
-  // Fetch Academy settings and materials from Firestore
+  // Fetch Academy settings and materials from Supabase
   const loadAcademyData = useCallback(async () => {
     try {
       const [cloudSettings, cloudResources] = await Promise.all([
-        fetchAcademySettings(),
-        fetchAcademyResources()
+        fetchAcademySettingsFromSupabase(),
+        fetchAcademyResourcesFromSupabase()
       ]);
       if (cloudSettings && cloudSettings.heading) {
         setAcademyHeading(cloudSettings.heading);
@@ -251,7 +362,7 @@ export default function App() {
         }
       }
     } catch (err) {
-      console.warn('Academy data load from Firestore/cache:', err);
+      console.warn('Academy data load from Supabase/cache note:', err);
     }
   }, []);
 
@@ -260,9 +371,9 @@ export default function App() {
     setAcademyHeading(newHeading);
     localStorage.setItem('ocu_academy_heading', newHeading);
     try {
-      await saveAcademySettingsInFirestore({ heading: newHeading });
+      await saveAcademySettingsInSupabase({ heading: newHeading });
     } catch (err) {
-      console.warn('Could not sync academy heading to firestore:', err);
+      console.warn('Could not sync academy heading to Supabase:', err);
     }
   };
 
@@ -277,9 +388,9 @@ export default function App() {
       return updated;
     });
     try {
-      await saveAcademyResourceInFirestore(resource);
+      await saveAcademyResourceInSupabase(resource);
     } catch (err) {
-      console.warn('Could not sync academy resource to firestore:', err);
+      console.warn('Could not sync academy resource to Supabase:', err);
     }
   };
 
@@ -295,9 +406,9 @@ export default function App() {
       return updated;
     });
     try {
-      await deleteAcademyResourceFromFirestore(resourceId);
+      await deleteAcademyResourceFromSupabase(resourceId);
     } catch (err) {
-      console.warn('Could not delete academy resource from firestore:', err);
+      console.warn('Could not delete academy resource from Supabase:', err);
     }
   };
 
@@ -318,10 +429,25 @@ export default function App() {
     // Force clear any stale admin state on initial session verification
     clearAdminState();
 
-    // Check current session on load
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    // Check current session on load (Requirement 4: Persistent Block on Refresh)
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session?.user) {
         const u = session.user;
+        const banCheck = await checkUserBanStatus(u.id, u.user_metadata);
+        if (banCheck.isBanned) {
+          console.warn('[Security] User is temporarily banned on initial session check. Logging out...');
+          await supabase.auth.signOut();
+          clearAdminState();
+          setUser(null);
+          setUserProfile(null);
+          setIsGuest(false);
+          const untilStr = banCheck.bannedUntil 
+            ? ` Access is suspended until ${new Date(banCheck.bannedUntil).toLocaleString()}.`
+            : '';
+          setBanError(`You are banned temporarily.${untilStr}`);
+          return;
+        }
+
         const profile = {
           user_id: u.id,
           email: u.email || '',
@@ -332,12 +458,13 @@ export default function App() {
         setUser(u);
         setUserProfile(profile);
         setIsGuest(false);
+        setBanError(null);
         upsertUserProfile(profile).catch(console.error);
         loadSupabaseData();
       }
     });
 
-    // Set up Auth State Changes
+    // Set up Auth State Changes (Requirement 4: Persistent block on auth state changes)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log("Auth event:", event, session?.user?.email);
 
@@ -348,6 +475,21 @@ export default function App() {
 
       if (session?.user) {
         const u = session.user;
+        const banCheck = await checkUserBanStatus(u.id, u.user_metadata);
+        if (banCheck.isBanned) {
+          console.warn('[Security] User is temporarily banned on auth event. Logging out...');
+          await supabase.auth.signOut();
+          clearAdminState();
+          setUser(null);
+          setUserProfile(null);
+          setIsGuest(false);
+          const untilStr = banCheck.bannedUntil 
+            ? ` Access is suspended until ${new Date(banCheck.bannedUntil).toLocaleString()}.`
+            : '';
+          setBanError(`You are banned temporarily.${untilStr}`);
+          return;
+        }
+
         const profile = {
           user_id: u.id,
           email: u.email || '',
@@ -358,6 +500,7 @@ export default function App() {
         setUser(u);
         setUserProfile(profile);
         setIsGuest(false);
+        setBanError(null);
         try {
           await upsertUserProfile(profile);
         } catch (err) {
@@ -376,6 +519,51 @@ export default function App() {
     };
   }, [isConfigInitialized, loadSupabaseData, clearAdminState]);
 
+  // REQUIREMENT 3: Immediate Kicking (Realtime)
+  // Set up a Supabase Realtime subscription listening to updates on the current active user's row in the profiles table.
+  // If the admin updates the banned_until field to a future date while user is active, automatically force a logout,
+  // route them back to the login screen, and show "You are banned temporarily."
+  useEffect(() => {
+    if (!isConfigInitialized || !isSupabaseConfigured || !supabase || !user?.id) return;
+
+    const currentUserId = user.id;
+    console.log(`[Realtime Ban Monitor] Subscribing to profiles updates for active user: ${currentUserId}`);
+
+    const banChannel = supabase
+      .channel(`active_user_ban_watch_${currentUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'profiles',
+          filter: `user_id=eq.${currentUserId}`,
+        },
+        async (payload) => {
+          console.log('⚡ [Realtime Ban Monitor] Profile change detected for active user:', payload);
+          const updated = payload.new as any;
+          if (updated && updated.banned_until && isUserTemporarilyBanned(updated.banned_until)) {
+            console.warn('⚡ [Realtime Ban Monitor] User has been banned in real-time by admin! Kicking immediately...');
+            await supabase.auth.signOut();
+            clearAdminState();
+            setUser(null);
+            setUserProfile(null);
+            setIsGuest(false);
+            const banUntilStr = new Date(updated.banned_until).toLocaleString();
+            setBanError(`You are banned temporarily. Access is suspended until ${banUntilStr}.`);
+            setView('home');
+          }
+        }
+      )
+      .subscribe((status) => {
+        console.log(`[Realtime Ban Monitor] Channel status:`, status);
+      });
+
+    return () => {
+      supabase.removeChannel(banChannel);
+    };
+  }, [isConfigInitialized, user?.id, clearAdminState]);
+
   const handleUserLogout = async () => {
     // 1. Explicitly clear all admin-related states and storage flags
     clearAdminState();
@@ -390,6 +578,7 @@ export default function App() {
     setUser(null);
     setUserProfile(null);
     setIsGuest(false);
+    setBanError(null);
     localStorage.removeItem('ocu_guest_mode');
     setView('home');
   };
@@ -593,9 +782,11 @@ export default function App() {
   if (!user && !isGuest) {
     return (
       <LoginPage 
+        initialError={banError}
         onLoginSuccess={(u, profile) => {
           // Explicitly force admin state to false on every user login
           clearAdminState();
+          setBanError(null);
           setUser(u);
           setUserProfile(profile);
           setIsGuest(false);
@@ -604,6 +795,7 @@ export default function App() {
         onContinueAsGuest={() => {
           // Explicitly force admin state to false on guest access
           clearAdminState();
+          setBanError(null);
           setIsGuest(true);
           localStorage.setItem('ocu_guest_mode', 'true');
           setView('home');
@@ -980,30 +1172,37 @@ export default function App() {
 
                         {/* Card CTA Buttons */}
                         <div className="pt-6 mt-6 border-t border-white/5 space-y-2.5">
-                          {item.pdfUrl && (
-                            <a
-                              href={item.pdfUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              download={item.pdfFileName || `${item.id}-study-notes.pdf`}
-                              onClick={() => {
-                                setDownloadNotification(`Downloading PDF: "${item.pdfFileName || item.title}"`);
-                                setTimeout(() => setDownloadNotification(null), 4000);
-                              }}
-                              className="w-full py-2.5 px-4 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-500/30 text-emerald-400 font-mono text-xs font-semibold uppercase tracking-wider transition-all duration-300 flex items-center justify-center gap-2 cursor-pointer shadow-sm hover:shadow"
-                            >
-                              <Download size={13} />
-                              <span>Download PDF File</span>
-                            </a>
-                          )}
+                          {/* Primary: Open Secure PDF Reader (Available for all students) */}
                           <button
-                            id={`btn-access-${item.id}`}
-                            onClick={() => setSelectedAcademyResource(item)}
-                            className="w-full py-3 px-4 rounded-lg bg-gradient-to-r from-ocu-crimson to-red-700 hover:from-ocu-gold hover:to-amber-500 text-white hover:text-black font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer shadow-md flex items-center justify-center gap-2 group-hover:shadow-lg"
+                            id={`btn-read-academy-${item.id}`}
+                            onClick={() => setReadingAcademyResource(item)}
+                            className="w-full py-3 px-4 rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-black font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer shadow-md flex items-center justify-center gap-2 hover:shadow-lg"
                           >
-                            <BookOpen size={13} />
-                            <span>{isPaid ? `Access Notes (₹${item.priceINR})` : 'Access Notes (Free)'}</span>
+                            <FileText size={14} />
+                            <span>Read Study Notes (PDF)</span>
                           </button>
+
+                          {/* Admin-Only Quick Download Link */}
+                          {isAdminLoggedIn && item.pdfUrl && (
+                            <div className="pt-1 flex items-center justify-between text-[10px] font-mono text-emerald-400/90 px-1 border-t border-white/5 mt-1">
+                              <span className="flex items-center gap-1 text-white/50">
+                                <Lock size={10} className="text-amber-400" />
+                                <span>Admin Privilege</span>
+                              </span>
+                              <button
+                                onClick={() => {
+                                  const link = document.createElement('a');
+                                  link.href = item.pdfUrl!;
+                                  link.download = item.pdfFileName || `${item.id}-notes.pdf`;
+                                  link.click();
+                                }}
+                                className="text-emerald-400 hover:text-emerald-300 underline cursor-pointer flex items-center gap-1 font-bold"
+                              >
+                                <Download size={11} />
+                                <span>Download PDF</span>
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     );
@@ -1135,7 +1334,8 @@ export default function App() {
           >
             <ComicReader 
               comic={readingComic} 
-              onClose={() => {
+              onClose={(reason) => {
+                console.log('Reader closed triggered by: ', reason || 'Unspecified manual close');
                 setReadingComic(null);
                 setView('comics');
                 setTimeout(() => {
@@ -1150,6 +1350,30 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Dedicated OCU Academy Secure PDF Reader */}
+      <AnimatePresence>
+        {readingAcademyResource && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+            className="fixed inset-0 z-50 overflow-hidden"
+          >
+            <AcademyPdfReader
+              pdfUrl={readingAcademyResource.pdfUrl}
+              resource={readingAcademyResource}
+              onClose={(reason) => {
+                console.log('[ACADEMY-PDF-READER] Closed by:', reason || 'User action');
+                setReadingAcademyResource(null);
+              }}
+              isAdmin={isAdminLoggedIn}
+              userEmail={user?.email || (isGuest ? 'Guest Student' : 'Student')}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Cinematic Admin Login dialog */}
       <AdminLoginModal
         isOpen={isLoginModalOpen}
@@ -1158,6 +1382,10 @@ export default function App() {
           setIsAdminLoggedIn(true);
           sessionStorage.setItem('ocu_admin_logged_in', 'true');
           sessionStorage.setItem('isAdmin', 'true');
+          localStorage.setItem('ocu_admin_logged_in', 'true');
+          localStorage.setItem('isAdmin', 'true');
+          window.dispatchEvent(new Event('storage'));
+          window.dispatchEvent(new CustomEvent('ocu-admin-auth-change', { detail: { isAdmin: true } }));
           setView('admin');
         }}
         adminAccessCode={adminAccessCode}
@@ -1222,32 +1450,28 @@ export default function App() {
                 {selectedAcademyResource.description}
               </p>
 
-              {/* PDF Document Status if Attached */}
-              {selectedAcademyResource.pdfUrl && (
-                <div className="p-3.5 rounded-xl bg-emerald-950/30 border border-emerald-500/30 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5 text-xs text-emerald-300 font-mono">
-                    <FileText size={16} className="text-emerald-400 flex-shrink-0" />
-                    <div>
-                      <p className="font-bold text-white text-xs">{selectedAcademyResource.pdfFileName || 'Verified Syllabus PDF'}</p>
-                      <p className="text-[10px] text-emerald-400/80">Uploaded and ready for immediate mobile download</p>
-                    </div>
+              {/* PDF Document Status */}
+              <div className="p-3.5 rounded-xl bg-emerald-950/30 border border-emerald-500/30 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 text-xs text-emerald-300 font-mono min-w-0">
+                  <FileText size={16} className="text-emerald-400 flex-shrink-0" />
+                  <div className="min-w-0 truncate">
+                    <p className="font-bold text-white text-xs truncate">{selectedAcademyResource.pdfFileName || 'Verified Syllabus PDF Kit'}</p>
+                    <p className="text-[10px] text-emerald-400/80">Classroom DRM Protected Academic Reader</p>
                   </div>
-                  <a
-                    href={selectedAcademyResource.pdfUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    download={selectedAcademyResource.pdfFileName || `${selectedAcademyResource.id}-notes.pdf`}
-                    onClick={() => {
-                      setDownloadNotification(`Opening PDF: "${selectedAcademyResource.pdfFileName || selectedAcademyResource.title}"`);
-                      setTimeout(() => setDownloadNotification(null), 4000);
-                    }}
-                    className="px-3 py-1.5 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-mono font-bold text-xs flex items-center gap-1 cursor-pointer transition-colors flex-shrink-0"
-                  >
-                    <Download size={12} />
-                    <span>Get PDF</span>
-                  </a>
                 </div>
-              )}
+                <button
+                  id="btn-modal-open-reader"
+                  onClick={() => {
+                    const res = selectedAcademyResource;
+                    setSelectedAcademyResource(null);
+                    setReadingAcademyResource(res);
+                  }}
+                  className="px-3 py-1.5 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors flex-shrink-0"
+                >
+                  <BookOpen size={12} />
+                  <span>Open Reader</span>
+                </button>
+              </div>
 
               {/* Units & Syllabus Breakdown */}
               <div className="space-y-3">
@@ -1293,37 +1517,37 @@ export default function App() {
                     : 'FREE DIGITAL REVISION ASSET • ACCREDITED'}
                 </div>
                 <div className="flex items-center gap-3 w-full sm:w-auto">
-                  {selectedAcademyResource.pdfUrl ? (
-                    <a
-                      id="btn-download-academy-notes"
-                      href={selectedAcademyResource.pdfUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      download={selectedAcademyResource.pdfFileName || `${selectedAcademyResource.id}-notes.pdf`}
-                      onClick={() => {
-                        setDownloadNotification(`Downloading "${selectedAcademyResource.pdfFileName || selectedAcademyResource.title}"`);
-                        setTimeout(() => setDownloadNotification(null), 4000);
-                      }}
-                      className="flex-1 sm:flex-none px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-black font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer flex items-center justify-center gap-2 shadow-lg"
-                    >
-                      <Download size={14} />
-                      <span>Download PDF Notes</span>
-                    </a>
-                  ) : (
+                  <button
+                    id="btn-open-academy-reader-from-modal"
+                    onClick={() => {
+                      const res = selectedAcademyResource;
+                      setSelectedAcademyResource(null);
+                      setReadingAcademyResource(res);
+                    }}
+                    className="flex-1 sm:flex-none px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-black font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer flex items-center justify-center gap-2 shadow-lg"
+                  >
+                    <BookOpen size={14} />
+                    <span>Open in Secure Reader</span>
+                  </button>
+
+                  {/* Admin-Only Direct Download Button */}
+                  {isAdminLoggedIn && selectedAcademyResource.pdfUrl && (
                     <button
-                      id="btn-download-academy-notes"
+                      id="btn-admin-modal-download"
                       onClick={() => {
-                        setDownloadNotification(`Downloaded 11th-Grade Study Kit for "${selectedAcademyResource.title}"`);
-                        setTimeout(() => {
-                          setDownloadNotification(null);
-                        }, 4000);
+                        const link = document.createElement('a');
+                        link.href = selectedAcademyResource.pdfUrl!;
+                        link.download = selectedAcademyResource.pdfFileName || `${selectedAcademyResource.id}-notes.pdf`;
+                        link.click();
                       }}
-                      className="flex-1 sm:flex-none px-5 py-2.5 bg-gradient-to-r from-ocu-crimson to-red-700 hover:from-ocu-gold hover:to-amber-500 text-white hover:text-black rounded-lg font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer flex items-center justify-center gap-2 shadow-lg"
+                      className="px-4 py-2.5 rounded-lg bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 hover:text-white font-mono text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                      title="Admin Privilege: Unrestricted PDF Download"
                     >
-                      <Download size={14} />
-                      <span>Download Notes</span>
+                      <Download size={13} />
+                      <span className="hidden sm:inline">Admin Download</span>
                     </button>
                   )}
+
                   <button
                     onClick={() => setSelectedAcademyResource(null)}
                     className="px-4 py-2.5 bg-white/5 hover:bg-white/10 text-white rounded-lg font-display font-medium text-xs transition-colors cursor-pointer"
@@ -1420,6 +1644,54 @@ export default function App() {
 
         </div>
       </footer>
+
+      {/* Fallback & Feedback Toast Alert System */}
+      <AnimatePresence>
+        {toastNotice && (
+          <motion.div
+            key={toastNotice.id}
+            initial={{ opacity: 0, y: -20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.95 }}
+            transition={{ duration: 0.25 }}
+            className={`fixed top-20 right-6 z-[99999] max-w-md p-4 rounded-xl border backdrop-blur-xl shadow-2xl flex items-start gap-3 text-left ${
+              toastNotice.type === 'warning'
+                ? 'bg-amber-950/90 border-amber-500/40 text-amber-200 shadow-amber-950/50'
+                : toastNotice.type === 'error'
+                  ? 'bg-red-950/90 border-red-500/40 text-red-200 shadow-red-950/50'
+                  : toastNotice.type === 'success'
+                    ? 'bg-emerald-950/90 border-emerald-500/40 text-emerald-200 shadow-emerald-950/50'
+                    : 'bg-zinc-900/90 border-white/20 text-white shadow-black/50'
+            }`}
+            role="alert"
+          >
+            {toastNotice.type === 'warning' && <AlertTriangle className="text-amber-400 shrink-0 mt-0.5" size={18} />}
+            {toastNotice.type === 'error' && <AlertCircle className="text-red-400 shrink-0 mt-0.5" size={18} />}
+            {toastNotice.type === 'success' && <Check className="text-emerald-400 shrink-0 mt-0.5" size={18} />}
+            {toastNotice.type === 'info' && <BookOpen className="text-ocu-gold shrink-0 mt-0.5" size={18} />}
+
+            <div className="flex-grow space-y-0.5">
+              {toastNotice.title && (
+                <p className="font-display font-bold text-xs uppercase tracking-wider">
+                  {toastNotice.title}
+                </p>
+              )}
+              <p className="font-sans text-xs leading-relaxed opacity-90">
+                {toastNotice.message}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setToastNotice(null)}
+              className="text-white/60 hover:text-white p-1 rounded transition-colors cursor-pointer shrink-0"
+              aria-label="Close notification"
+            >
+              <X size={14} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

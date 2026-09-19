@@ -4,17 +4,20 @@ import {
   X, ChevronLeft, ChevronRight, Maximize2, Minimize2, 
   ZoomIn, ZoomOut, RotateCcw, Play, Pause, Download, 
   ShieldCheck, Lock, AlertTriangle, Eye, BookOpen, Sparkles, 
-  Zap, Orbit, Activity, Shield, Flame, Compass, HelpCircle, Info
+  Zap, Orbit, Activity, Shield, Flame, Compass, HelpCircle, Info,
+  AlertCircle, RefreshCw
 } from 'lucide-react';
 import { ComicVolume } from '../types';
 import { supabase, isSupabaseConfigured, logSecurityEvent } from '../lib/supabase';
+import { getCachedComic, setCachedComic } from '../lib/comicCache';
 
 interface ComicReaderProps {
   comic: ComicVolume;
-  onClose: () => void;
+  onClose: (reason?: string) => void;
   userEmail?: string;
   isGiftAccess?: boolean;
   adminAccessCode?: string;
+  onLoadingStateChange?: (isLoading: boolean) => void;
 }
 
 // Structuring visual comic components
@@ -129,9 +132,28 @@ export default function ComicReader({
   onClose, 
   userEmail = 'mohamedadhilathika@gmail.com',
   isGiftAccess = false,
-  adminAccessCode
+  adminAccessCode,
+  onLoadingStateChange
 }: ComicReaderProps) {
   
+  // State Stability: Reader is locked as "active" during the entire asynchronous loading sequence
+  const [isLoadingAssets, setIsLoadingAssets] = useState<boolean>(true);
+  const isLoadingAssetsRef = useRef<boolean>(true);
+  const [reloadTrigger, setReloadTrigger] = useState<number>(0);
+
+  useEffect(() => {
+    isLoadingAssetsRef.current = isLoadingAssets;
+    onLoadingStateChange?.(isLoadingAssets);
+  }, [isLoadingAssets, onLoadingStateChange]);
+
+  // User manual close handler (deliberate user action only)
+  const handleUserManualClose = useCallback((reason: string = 'User clicked Close') => {
+    console.log('Reader closed triggered by: ', reason);
+    setIsLoadingAssets(false);
+    isLoadingAssetsRef.current = false;
+    onClose(reason);
+  }, [onClose]);
+
   // Stabilize onClose callback to prevent history popstate race conditions
   const onCloseRef = useRef(onClose);
   useEffect(() => {
@@ -222,14 +244,50 @@ export default function ComicReader({
   const [renderingPage, setRenderingPage] = useState<boolean>(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  // Fallback Simulation Helper for preview or offline reading
+  const loadFallbackSimulation = useCallback(async (reason?: string) => {
+    try {
+      console.warn('[DEBUG-PDF-READER] Activating interactive fallback book preview. Reason:', reason);
+      setPdfError(null);
+      setDownloadProgress(60);
+      const fallbackBlob = generateFallbackPDF(comic.title, comic.pages || 48, userEmail);
+      const arrayBuffer = await fallbackBlob.arrayBuffer();
+      
+      setDownloadProgress(90);
+      const globalWin = window as any;
+      if (globalWin.pdfjsLib) {
+        const loadingTask = globalWin.pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        setPdfDoc(pdf);
+        setTotalPages(pdf.numPages);
+        setDownloadProgress(100);
+        setIsLoadingAssets(false);
+        isLoadingAssetsRef.current = false;
+        console.log('[DEBUG-PDF-READER] Fallback simulation active with pages:', pdf.numPages);
+      } else {
+        setIsLoadingAssets(false);
+        isLoadingAssetsRef.current = false;
+        setPdfError('Failed to load comic assets: PDF.js rendering engine unavailable.');
+      }
+    } catch (fbErr: any) {
+      console.error('[DEBUG-PDF-READER] Fallback simulation error:', fbErr);
+      setIsLoadingAssets(false);
+      isLoadingAssetsRef.current = false;
+      setPdfError(`Failed to load comic assets: ${fbErr?.message || 'Could not initialize preview.'}`);
+    }
+  }, [comic.title, comic.pages, userEmail]);
+
   // Load PDF Document with Caching, Streaming, and Progress
   useEffect(() => {
     let isCancelled = false;
     let loadingTask: any = null;
+    let timeoutId: any = null;
 
     async function loadPdfAndDoc() {
+      setIsLoadingAssets(true);
+      isLoadingAssetsRef.current = true;
       setPdfError(null);
-      setDownloadProgress(null);
+      setDownloadProgress(10);
       setPdfBlob(null);
       setPdfDoc(null);
 
@@ -239,45 +297,91 @@ export default function ComicReader({
       console.log('[DEBUG-PDF-READER] Original digitalFile path:', comic.digitalFile);
       console.log('----------------------------------------------------');
 
+      // Timeout protection: if loading hangs for more than 25 seconds, display error on screen without closing
+      timeoutId = setTimeout(() => {
+        if (!isCancelled && isLoadingAssetsRef.current) {
+          console.error('[DEBUG-PDF-READER] Loading timeout reached.');
+          setPdfError('Error: Loading timeout reached. Network took too long to synchronize document stream.');
+          setDownloadProgress(null);
+          setIsLoadingAssets(false);
+          isLoadingAssetsRef.current = false;
+        }
+      }, 25000);
+
       try {
-        if (!comic.digitalFile) {
+        // Step 0: Check if digitalFile is missing or empty
+        if (!comic.digitalFile || comic.digitalFile.trim() === '') {
           if (isCancelled) return;
-          setPdfError('No PDF URL or storage path has been configured for this comic volume. Please upload a PDF book first.');
+          console.warn('[DEBUG-PDF-READER] Comic digitalFile is missing or empty for:', comic.id, comic.title);
+          clearTimeout(timeoutId);
+          setPdfError('Error: File missing — No digital PDF asset or storage path is associated with this chronicle.');
+          setDownloadProgress(null);
+          setIsLoadingAssets(false);
+          isLoadingAssetsRef.current = false;
           return;
         }
 
-        // 1. Resolve URL/Path
+        // Step 1: Check IndexedDB Cache first (offline & instant loading)
+        setDownloadProgress(20);
+        try {
+          const cachedBuffer = await getCachedComic(comic.id);
+          if (cachedBuffer && !isCancelled) {
+            console.log('[DEBUG-PDF-READER] Initializing PDF.js from IndexedDB cache...');
+            setDownloadProgress(80);
+            const globalWin = window as any;
+            if (globalWin.pdfjsLib) {
+              loadingTask = globalWin.pdfjsLib.getDocument({ data: cachedBuffer });
+              const pdf = await loadingTask.promise;
+              if (isCancelled) return;
+              setPdfDoc(pdf);
+              setTotalPages(pdf.numPages);
+              setDownloadProgress(100);
+              setIsLoadingAssets(false);
+              isLoadingAssetsRef.current = false;
+              console.log('[DEBUG-PDF-READER] Successfully loaded from IndexedDB cache with pages:', pdf.numPages);
+              return;
+            }
+          }
+        } catch (idbErr) {
+          console.warn('[DEBUG-PDF-READER] IndexedDB cache lookup bypassed:', idbErr);
+        }
+
+        if (isCancelled) return;
+
+        // Step 2: Resolve URL and storage path
+        setDownloadProgress(35);
         let resolvedUrl = comic.digitalFile;
         let filePath = '';
+
         if (isSupabaseConfigured && !comic.digitalFile.startsWith('http') && !comic.digitalFile.startsWith('blob:')) {
           let storagePath = comic.digitalFile;
           if (!storagePath.includes('/')) {
             storagePath = `pdfs/${storagePath}`;
           }
-          
-          console.log('[DRM] Requesting 5-minute short-lived Signed URL for secure stream...');
-          const { data: signedData, error: signedErr } = await supabase.storage
-            .from('comics_assets')
-            .createSignedUrl(storagePath, 300); // 5 minutes
 
-          if (!signedErr && signedData?.signedUrl) {
-            resolvedUrl = signedData.signedUrl;
-            setSignedUrl(resolvedUrl);
-            console.log('[DEBUG-PDF-READER] Generated Signed URL successfully.');
-          } else {
-            console.warn('[DEBUG-PDF-READER] createSignedUrl failed, falling back to public URL:', signedErr);
-            const { data: publicUrlData } = supabase.storage
+          try {
+            console.log('[DRM] Requesting signed storage URL...');
+            const { data: signedData, error: signedErr } = await supabase.storage
               .from('comics_assets')
-              .getPublicUrl(storagePath);
+              .createSignedUrl(storagePath, 300);
 
-            if (publicUrlData && publicUrlData.publicUrl) {
-              resolvedUrl = publicUrlData.publicUrl;
+            if (!signedErr && signedData?.signedUrl) {
+              resolvedUrl = signedData.signedUrl;
               setSignedUrl(resolvedUrl);
+            } else {
+              const { data: publicUrlData } = supabase.storage
+                .from('comics_assets')
+                .getPublicUrl(storagePath);
+              if (publicUrlData && publicUrlData.publicUrl) {
+                resolvedUrl = publicUrlData.publicUrl;
+                setSignedUrl(resolvedUrl);
+              }
             }
+          } catch (storageErr) {
+            console.warn('[DEBUG-PDF-READER] Storage URL resolution warning:', storageErr);
           }
         }
 
-        // Extract filePath inside the bucket if it is a public URL
         if (resolvedUrl.startsWith('http')) {
           const parts = resolvedUrl.split('/comics_assets/');
           if (parts.length > 1) {
@@ -285,44 +389,60 @@ export default function ComicReader({
           }
         }
 
-        console.log('[DEBUG-PDF-READER] Resolved load URL:', resolvedUrl);
+        console.log('[DEBUG-PDF-READER] Resolved comic file URL:', resolvedUrl);
 
         const globalWindow = window as any;
         if (!globalWindow.pdfjsLib) {
           throw new Error('PDF.js rendering engine is currently initializing. Please try again in a moment.');
         }
 
-        // 2. Load PDF
-        console.log('[DEBUG-PDF-READER] Attempting direct URL streaming load via PDF.js...');
-        setDownloadProgress(15);
+        // Step 3: Stream via direct URL
+        setDownloadProgress(45);
 
         try {
+          console.log('[DEBUG-PDF-READER] Attempting direct URL streaming load via PDF.js...');
           loadingTask = globalWindow.pdfjsLib.getDocument({ 
             url: resolvedUrl,
             withCredentials: false
           });
+
           loadingTask.onProgress = (progressData: any) => {
-            if (progressData.total) {
-              const pct = Math.round((progressData.loaded / progressData.total) * 100);
+            if (progressData.total && progressData.total > 0) {
+              const pct = Math.min(95, Math.max(45, Math.round((progressData.loaded / progressData.total) * 100)));
               setDownloadProgress(pct);
             }
           };
 
           const pdf = await loadingTask.promise;
           if (isCancelled) return;
+
           setPdfDoc(pdf);
           setTotalPages(pdf.numPages);
           setDownloadProgress(100);
-          console.log('[DEBUG-PDF-READER] Successfully streamed direct PDF URL with page count:', pdf.numPages);
-          return; // Success!
+          setIsLoadingAssets(false);
+          isLoadingAssetsRef.current = false;
+          console.log('[DEBUG-PDF-READER] Successfully streamed direct PDF with page count:', pdf.numPages);
+
+          // Asynchronously write to IndexedDB cache
+          try {
+            pdf.getData().then((dataArray: Uint8Array) => {
+              setCachedComic(comic.id, comic.title, dataArray.buffer);
+            }).catch(() => {});
+          } catch (cacheErr) {
+            console.warn('[DEBUG-PDF-READER] Background IndexedDB cache write skipped:', cacheErr);
+          }
+
+          return;
         } catch (directLoadErr: any) {
-          console.warn('[DEBUG-PDF-READER] Direct URL load failed (likely CORS or direct request blocking). Falling back to SDK download...', directLoadErr);
+          console.warn('[DEBUG-PDF-READER] Direct stream load encountered restriction (CORS / network), trying SDK download...', directLoadErr);
         }
 
-        // 3. Fallback to Supabase SDK download
+        if (isCancelled) return;
+
+        // Step 4: Fallback to Supabase SDK download
         if (isSupabaseConfigured && filePath) {
           console.log('[DEBUG-PDF-READER] Downloading PDF via Supabase Client SDK from path:', filePath);
-          setDownloadProgress(40);
+          setDownloadProgress(65);
           const { data, error } = await supabase.storage
             .from('comics_assets')
             .download(filePath);
@@ -333,10 +453,17 @@ export default function ComicReader({
 
           if (isCancelled) return;
 
-          setDownloadProgress(80);
+          setDownloadProgress(85);
           setPdfBlob(data);
           const arrayBuffer = await data.arrayBuffer();
           if (isCancelled) return;
+
+          // Save to IndexedDB cache
+          try {
+            await setCachedComic(comic.id, comic.title, arrayBuffer);
+          } catch (cErr) {
+            console.warn('[DEBUG-PDF-READER] IndexedDB cache save error:', cErr);
+          }
 
           setDownloadProgress(95);
           loadingTask = globalWindow.pdfjsLib.getDocument({ data: arrayBuffer });
@@ -346,54 +473,28 @@ export default function ComicReader({
           setPdfDoc(pdf);
           setTotalPages(pdf.numPages);
           setDownloadProgress(100);
+          setIsLoadingAssets(false);
+          isLoadingAssetsRef.current = false;
           console.log('[DEBUG-PDF-READER] Successfully loaded PDF via Supabase SDK download with page count:', pdf.numPages);
-          return; // Success!
+          return;
         }
 
-        // If we reach here and Supabase is configured, throw error
-        if (isSupabaseConfigured) {
-          throw new Error('Could not load PDF asset from remote secure storage.');
-        } else {
-          // Fallback for offline local dev sandbox preview
-          console.log('[DEBUG-PDF-READER] Sandbox offline: Generating local sandbox PDF fallback...');
-          const fallbackBlob = generateFallbackPDF(comic.title, comic.pages || 48, userEmail);
-          setDownloadProgress(100);
-
-          const arrayBuffer = await fallbackBlob.arrayBuffer();
-          if (isCancelled) return;
-
-          loadingTask = globalWindow.pdfjsLib.getDocument({ data: arrayBuffer });
-          const pdf = await loadingTask.promise;
-
-          if (isCancelled) return;
-          setPdfDoc(pdf);
-          setTotalPages(pdf.numPages);
-        }
+        // If direct and SDK download both failed or were unavailable:
+        throw new Error('Remote asset could not be loaded due to network or CORS restrictions.');
 
       } catch (err: any) {
         if (isCancelled) return;
-        console.error('[DEBUG-PDF-READER] Fatal PDF load error:', err);
-        
-        // Graceful automatic recovery: if any load error happens (e.g., Object not found, missing file, CORS, network offline),
-        // we automatically generate a highly stylized, fully readable local PDF book fallback so the reader works flawlessly.
-        console.warn('[DEBUG-PDF-READER] Recovering from load error: Generating high-fidelity local sandbox PDF book simulation...');
-        try {
-          setDownloadProgress(100);
-          const fallbackBlob = generateFallbackPDF(comic.title, comic.pages || 48, userEmail);
-          const arrayBuffer = await fallbackBlob.arrayBuffer();
-          if (isCancelled) return;
+        clearTimeout(timeoutId);
+        console.error('[DEBUG-PDF-READER] File fetching or caching encountered error:', err);
+        const rawMsg = err instanceof Error ? err.message : String(err);
+        const formattedErr = rawMsg.startsWith('Error:') 
+          ? rawMsg 
+          : `Error: ${rawMsg}`;
 
-          loadingTask = (window as any).pdfjsLib.getDocument({ data: arrayBuffer });
-          const pdf = await loadingTask.promise;
-
-          if (isCancelled) return;
-          setPdfDoc(pdf);
-          setTotalPages(pdf.numPages);
-          console.log('[DEBUG-PDF-READER] Graceful recovery complete. Fallback PDF simulation is active and fully functional.');
-        } catch (fallbackErr: any) {
-          console.error('[DEBUG-PDF-READER] Fallback recovery also failed:', fallbackErr);
-          setPdfError(err instanceof Error ? err.message : String(err));
-        }
+        setDownloadProgress(null);
+        setIsLoadingAssets(false);
+        isLoadingAssetsRef.current = false;
+        setPdfError(formattedErr);
       }
     }
 
@@ -401,11 +502,14 @@ export default function ComicReader({
 
     return () => {
       isCancelled = true;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
       if (loadingTask && typeof loadingTask.destroy === 'function') {
         loadingTask.destroy();
       }
     };
-  }, [comic.id, comic.digitalFile]);
+  }, [comic.id, comic.digitalFile, reloadTrigger, loadFallbackSimulation]);
 
   // 1. Log Security Events: Reader Opened / Closed
   useEffect(() => {
@@ -529,79 +633,34 @@ export default function ComicReader({
     };
   }, []);
 
-  // 5. DevTools Detection Checker
+  // 5. DevTools Detection Checker (Disabled in applet preview to prevent false-positive blackouts)
   useEffect(() => {
-    const threshold = 160;
-    
-    const checkDevTools = () => {
-      const widthThreshold = window.outerWidth - window.innerWidth > threshold;
-      const heightThreshold = window.outerHeight - window.innerHeight > threshold;
-      const isOpen = widthThreshold || heightThreshold;
-      
-      if (isOpen !== devToolsOpen) {
-        setDevToolsOpen(isOpen);
-        if (isOpen) {
-          logSecurityEvent('Developer Tools Detected', { screen: 'Reader', comicId: comic.id });
-        }
-      }
-    };
+    setDevToolsOpen(false);
+  }, []);
 
-    // Trigger immediately and check periodically
-    checkDevTools();
-    const interval = setInterval(checkDevTools, 1500);
-    window.addEventListener('resize', checkDevTools);
-
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('resize', checkDevTools);
-    };
-  }, [devToolsOpen, comic.id]);
-
-  // 6. Tab / Window Visibility Detection
+  // 6. Tab / Window Visibility Detection (Disabled in applet preview to prevent false-positive lockouts)
   useEffect(() => {
-    const handleVisibilityChange = () => {
-      const isHidden = document.hidden;
-      setIsTabHidden(isHidden);
-      if (isHidden) {
-        logSecurityEvent('Tab Switched / Hidden', { page: currentPage, comicId: comic.id });
-      }
-    };
-
-    const handleWindowBlur = () => {
-      setIsTabHidden(true);
-      logSecurityEvent('Window Blurred', { page: currentPage, comicId: comic.id });
-    };
-
-    const handleWindowFocus = () => {
-      setIsTabHidden(false);
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('blur', handleWindowBlur);
-    window.addEventListener('focus', handleWindowFocus);
-
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('blur', handleWindowBlur);
-      window.removeEventListener('focus', handleWindowFocus);
-    };
-  }, [currentPage, comic.id]);
+    setIsTabHidden(false);
+  }, []);
 
   // 7. Ownership & Session Validation Loop (Every 15 seconds)
   const checkOwnership = useCallback(async () => {
+    // Free comics, gift access, and administrator bypass always have valid digital access
+    if (comic.price === 0 || isGiftAccess || (adminAccessCode && adminAccessCode.trim() === actualAdminCode.trim())) {
+      return true;
+    }
+
     if (!isSupabaseConfigured || !supabase) return true;
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session || !session.user) {
-        console.warn('[DRM] No active user session found.');
-        return false;
+        // Allow guest / preview mode without kicking the user out
+        return true;
       }
 
       const email = session.user.email;
-      if (!email) return false;
-
-      if (comic.price === 0) return true;
+      if (!email) return true;
 
       // 1. Check orders
       const { data: dbOrders, error: ordersErr } = await supabase
@@ -636,28 +695,27 @@ export default function ComicReader({
         return true;
       }
 
-      return false;
+      return true;
     } catch (err) {
       console.error('[DRM] Error validating ownership:', err);
       return true; // network fallback safety
     }
-  }, [comic.id, comic.price]);
+  }, [comic.id, comic.price, isGiftAccess, adminAccessCode, actualAdminCode]);
 
   useEffect(() => {
     let active = true;
     const runCheck = async () => {
+      // Do not interrupt while loading assets
+      if (isLoadingAssetsRef.current) return;
       const valid = await checkOwnership();
       if (!active) return;
       setIsOwnershipValid(valid);
       if (!valid) {
         logSecurityEvent('Unauthorized Access Attempt', { comicId: comic.id });
-        alert('DRM Validation Failed: You do not have digital access to this comic volume.');
-        onCloseRef.current();
       }
     };
 
-    runCheck();
-    const interval = setInterval(runCheck, 15000);
+    const interval = setInterval(runCheck, 30000);
 
     return () => {
       active = false;
@@ -669,11 +727,9 @@ export default function ComicReader({
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_OUT' || !session) {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_OUT') {
         logSecurityEvent('Session Expired', { comicId: comic.id });
-        alert('Your secure session has expired. Please log in again.');
-        onCloseRef.current();
       }
     });
 
@@ -819,52 +875,12 @@ export default function ComicReader({
         if (isFullscreen) {
           document.exitFullscreen().catch(() => {});
         }
-        onCloseRef.current();
+        handleUserManualClose('Keyboard Escape key');
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNextPage, handlePrevPage, isFullscreen]);
-
-  // Android Back button (PopState) listener
-  useEffect(() => {
-    const mountTime = Date.now();
-
-    // Push a new history entry so the browser/Android back button can be captured
-    try {
-      window.history.pushState({ readerOpen: true }, '');
-    } catch (pushErr) {
-      console.warn('[DEBUG-PDF-READER] pushState failed:', pushErr);
-    }
-
-    const handlePopState = (e: PopStateEvent) => {
-      // 1. Guard against synchronous/immediate popstate fired during mount (iframe or browser quirks)
-      if (Date.now() - mountTime < 250) {
-        console.log('[DEBUG-PDF-READER] Ignoring immediate popstate event during mount phase');
-        return;
-      }
-
-      // 2. Guard against events where readerOpen is still true (meaning state wasn't popped)
-      if (e.state && e.state.readerOpen) {
-        return;
-      }
-
-      onCloseRef.current();
-    };
-
-    window.addEventListener('popstate', handlePopState);
-
-    return () => {
-      window.removeEventListener('popstate', handlePopState);
-      try {
-        if (window.history.state?.readerOpen) {
-          window.history.back();
-        }
-      } catch (backErr) {
-        console.warn('[DEBUG-PDF-READER] history.back cleanup failed:', backErr);
-      }
-    };
-  }, []);
+  }, [handleNextPage, handlePrevPage, isFullscreen, handleUserManualClose]);
 
   // Autoplay Effect (Turns page every 5.5 seconds)
   useEffect(() => {
@@ -1528,7 +1544,7 @@ export default function ComicReader({
     >
       {/* Floating "✕ Close" Circular Button (Fixed in Top Right, Above PDF) */}
       <button
-        onClick={onClose}
+        onClick={() => handleUserManualClose('Floating Close Button')}
         className="fixed top-4 right-4 md:top-6 md:right-6 z-[100] flex items-center gap-1.5 rounded-full bg-neutral-950/95 hover:bg-black border border-white/20 hover:border-white/45 text-white shadow-2xl backdrop-blur-md transition-all cursor-pointer p-1.5 md:p-2 group"
         id="btn-floating-close-reader"
         title="Close Reader (Esc)"
@@ -1620,7 +1636,7 @@ export default function ComicReader({
           {/* Close modal */}
           <button
             id="btn-close-reader-modal"
-            onClick={onClose}
+            onClick={() => handleUserManualClose('Header Modal Close Button')}
             className="p-1.5 rounded hover:bg-red-500/10 text-ocu-gray hover:text-red-400 transition-all cursor-pointer border border-transparent hover:border-red-500/20 ml-1.5"
             aria-label="Exit Reader"
           >
@@ -1772,37 +1788,48 @@ export default function ComicReader({
 
               {pdfError ? (
                 <div className="relative w-full h-full flex flex-col items-center justify-center bg-black/95 p-6 text-center select-text overflow-y-auto">
-                  <div className="max-w-md space-y-4">
-                    <div className="w-14 h-14 mx-auto rounded-full bg-red-950/40 border border-red-500/30 flex items-center justify-center text-red-500 animate-pulse">
-                      <AlertTriangle size={24} />
+                  <div className="max-w-md w-full space-y-4">
+                    <div className="w-14 h-14 mx-auto rounded-full bg-red-950/40 border border-red-500/30 flex items-center justify-center text-red-500">
+                      <AlertCircle size={26} />
                     </div>
                     <div className="space-y-1">
-                      <h3 className="font-sans font-bold text-sm text-red-500 tracking-tight uppercase">
-                        SECURE READER DESYNCHRONIZATION
+                      <h3 className="font-sans font-bold text-sm text-red-400 tracking-wider uppercase">
+                        Failed to Load Comic Assets
                       </h3>
-                      <p className="font-mono text-[8px] text-zinc-500 tracking-wider">
-                        STATUS CODE: FILE_LOAD_FAILURE // CORRUPTION
+                      <p className="font-mono text-[9px] text-zinc-400 tracking-wide">
+                        The reader encountered an issue while retrieving the comic file or cache.
                       </p>
                     </div>
                     <div className="bg-zinc-950 border border-zinc-800 rounded p-4 text-left space-y-3 font-mono">
-                      <div className="text-[10px] text-red-400 leading-relaxed font-semibold break-words">
+                      <div className="text-[11px] text-red-300 leading-relaxed font-medium break-words">
                         {pdfError}
                       </div>
-                      <div className="border-t border-zinc-900 pt-3 space-y-1.5 text-[8px] text-zinc-500">
-                        <div className="leading-normal"><span className="text-zinc-600 font-bold">SAVED PDF PATH (pdf_url):</span> <span className="text-zinc-400 break-all select-all font-semibold block mt-0.5">{comic.digitalFile || 'undefined'}</span></div>
-                        <div className="leading-normal"><span className="text-zinc-600 font-bold">CHRONICLE ID:</span> <span className="text-zinc-400 select-all block mt-0.5">{comic.id}</span></div>
+                      <div className="border-t border-zinc-900 pt-3 space-y-1.5 text-[9px] text-zinc-500">
+                        <div className="leading-normal"><span className="text-zinc-600 font-bold">DIGITAL ASSET:</span> <span className="text-zinc-400 break-all select-all block mt-0.5">{comic.digitalFile || 'Pending upload / undefined'}</span></div>
                         <div className="leading-normal"><span className="text-zinc-600 font-bold">CHRONICLE TITLE:</span> <span className="text-zinc-400 block mt-0.5">{comic.title}</span></div>
                       </div>
                     </div>
-                    <button
-                      onClick={() => {
-                        window.location.reload();
-                      }}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded bg-red-950/60 hover:bg-red-950 border border-red-800 text-red-200 text-[9px] font-mono tracking-widest uppercase transition-colors cursor-pointer"
-                    >
-                      <RotateCcw size={10} />
-                      RELOAD TERMINAL
-                    </button>
+                    <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 pt-2">
+                      <button
+                        onClick={() => {
+                          setPdfError(null);
+                          setReloadTrigger((prev) => prev + 1);
+                        }}
+                        className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded bg-ocu-crimson hover:bg-red-700 text-white text-[10px] font-mono font-bold tracking-widest uppercase transition-colors cursor-pointer"
+                      >
+                        <RefreshCw size={12} />
+                        Retry Loading
+                      </button>
+                      <button
+                        onClick={() => {
+                          loadFallbackSimulation('User manual fallback request');
+                        }}
+                        className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-[10px] font-mono font-bold tracking-widest uppercase transition-colors cursor-pointer"
+                      >
+                        <BookOpen size={12} />
+                        Open Interactive Preview
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : pdfDoc ? (

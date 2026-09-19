@@ -5,9 +5,10 @@ import {
   Clock, CheckCircle, XCircle, Search, AlertTriangle, Sparkles, Check, 
   Database, Activity, Edit3, BookOpen, DollarSign, UploadCloud, Tag, 
   Calendar, Layers, Archive, CheckSquare, X, LogOut, Settings, Award,
-  AlertCircle, Copy, GraduationCap
+  AlertCircle, Copy, GraduationCap,
+  Ban, UserX, UserCheck, RefreshCw
 } from 'lucide-react';
-import { ComicVolume, GiftCode, RedemptionHistory, Order, DiscountCoupon, FreeComicCoupon, CouponRedemption, AcademyResource } from '../types';
+import { ComicVolume, GiftCode, RedemptionHistory, Order, DiscountCoupon, FreeComicCoupon, CouponRedemption, AcademyResource, UserProfile } from '../types';
 import AcademyAdminTab from './AcademyAdminTab';
 import { 
   saveComicInSupabase, 
@@ -23,7 +24,10 @@ import {
   saveDiscountCoupon,
   deleteDiscountCoupon,
   saveFreeComicCoupon,
-  deleteFreeComicCoupon
+  deleteFreeComicCoupon,
+  fetchAllUserProfiles,
+  updateUserBan,
+  isUserTemporarilyBanned
 } from '../lib/supabase';
 
 interface AdminPanelProps {
@@ -328,8 +332,10 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     email TEXT,
     display_name TEXT,
     avatar_url TEXT,
-    last_login TEXT
+    last_login TEXT,
+    banned_until TIMESTAMPTZ
 );
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS banned_until TIMESTAMPTZ;
 
 -- Seed initial admin access code
 INSERT INTO public.admin_settings (key, value)
@@ -375,14 +381,37 @@ CREATE POLICY "Allow all public actions" ON public.coupon_redemptions FOR ALL US
 DROP POLICY IF EXISTS "Allow all public actions" ON public.profiles;
 CREATE POLICY "Allow all public actions" ON public.profiles FOR ALL USING (true) WITH CHECK (true);
 
+-- 6b. Academy Resources & Study Materials Table
+CREATE TABLE IF NOT EXISTS public.academy_resources (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    stream TEXT,
+    badge TEXT,
+    description TEXT,
+    features TEXT[] DEFAULT '{}',
+    chapters JSONB DEFAULT '[]',
+    exam_tips TEXT[] DEFAULT '{}',
+    doc_pages INTEGER DEFAULT 40,
+    pdf_url TEXT,
+    pdf_file_name TEXT,
+    tier TEXT DEFAULT 'free',
+    price_inr NUMERIC DEFAULT 0,
+    updated_at TEXT
+);
 
--- 7. Setup storage bucket (comics_assets) for covers, banners, and digital PDFs
+ALTER TABLE public.academy_resources DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all public actions" ON public.academy_resources;
+CREATE POLICY "Allow all public actions" ON public.academy_resources FOR ALL USING (true) WITH CHECK (true);
+
+-- 7. Setup storage buckets (comics_assets & academy-materials)
 DO $$
 BEGIN
-  -- Insert bucket if possible, ignore errors if restricted
+  -- Insert buckets if possible, ignore errors if restricted
   BEGIN
     INSERT INTO storage.buckets (id, name, public)
-    VALUES ('comics_assets', 'comics_assets', true)
+    VALUES 
+      ('comics_assets', 'comics_assets', true),
+      ('academy-materials', 'academy-materials', true)
     ON CONFLICT (id) DO NOTHING;
   EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'Could not insert storage bucket: %', SQLERRM;
@@ -391,28 +420,28 @@ BEGIN
   -- Create policies on storage.objects with exception handling for permission safety
   BEGIN
     DROP POLICY IF EXISTS "Public Read Access" ON storage.objects;
-    CREATE POLICY "Public Read Access" ON storage.objects FOR SELECT TO public USING (bucket_id = 'comics_assets');
+    CREATE POLICY "Public Read Access" ON storage.objects FOR SELECT TO public USING (bucket_id IN ('comics_assets', 'academy-materials'));
   EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'Could not set up storage SELECT policy: %', SQLERRM;
   END;
 
   BEGIN
     DROP POLICY IF EXISTS "Public Insert Access" ON storage.objects;
-    CREATE POLICY "Public Insert Access" ON storage.objects FOR INSERT TO public WITH CHECK (bucket_id = 'comics_assets');
+    CREATE POLICY "Public Insert Access" ON storage.objects FOR INSERT TO public WITH CHECK (bucket_id IN ('comics_assets', 'academy-materials'));
   EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'Could not set up storage INSERT policy: %', SQLERRM;
   END;
 
   BEGIN
     DROP POLICY IF EXISTS "Public Update Access" ON storage.objects;
-    CREATE POLICY "Public Update Access" ON storage.objects FOR UPDATE TO public USING (bucket_id = 'comics_assets');
+    CREATE POLICY "Public Update Access" ON storage.objects FOR UPDATE TO public USING (bucket_id IN ('comics_assets', 'academy-materials'));
   EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'Could not set up storage UPDATE policy: %', SQLERRM;
   END;
 
   BEGIN
     DROP POLICY IF EXISTS "Public Delete Access" ON storage.objects;
-    CREATE POLICY "Public Delete Access" ON storage.objects FOR DELETE TO public USING (bucket_id = 'comics_assets');
+    CREATE POLICY "Public Delete Access" ON storage.objects FOR DELETE TO public USING (bucket_id IN ('comics_assets', 'academy-materials'));
   EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'Could not set up storage DELETE policy: %', SQLERRM;
   END;
@@ -422,7 +451,7 @@ END $$;
 DO $$
 DECLARE
   t_name TEXT;
-  tables_to_add TEXT[] := ARRAY['comics', 'gift_codes', 'redemption_history', 'orders', 'admin_settings', 'discount_coupons', 'free_comic_coupons', 'coupon_redemptions', 'profiles'];
+  tables_to_add TEXT[] := ARRAY['comics', 'gift_codes', 'redemption_history', 'orders', 'admin_settings', 'discount_coupons', 'free_comic_coupons', 'coupon_redemptions', 'profiles', 'academy_resources'];
 BEGIN
   FOREACH t_name IN ARRAY tables_to_add LOOP
     IF EXISTS (
@@ -581,6 +610,47 @@ export default function AdminPanel({
   // Status & Feedback
   const [promoFeedback, setPromoFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [promoLoading, setPromoLoading] = useState(false);
+
+  // User Profiles & Temporary Bans Management States
+  const [profilesList, setProfilesList] = useState<UserProfile[]>([]);
+  const [loadingProfiles, setLoadingProfiles] = useState(false);
+  const [banStatusFeedback, setBanStatusFeedback] = useState<string | null>(null);
+  const [userSearchQuery, setUserSearchQuery] = useState('');
+
+  const loadProfiles = async () => {
+    setLoadingProfiles(true);
+    try {
+      const data = await fetchAllUserProfiles();
+      setProfilesList(data);
+    } catch (err) {
+      console.error('Failed to load user profiles:', err);
+    } finally {
+      setLoadingProfiles(false);
+    }
+  };
+
+  const handleApplyBan = async (userId: string, hours: number) => {
+    const banUntilDate = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+    const success = await updateUserBan(userId, banUntilDate);
+    if (success) {
+      setBanStatusFeedback(`Ban applied until ${new Date(banUntilDate).toLocaleString()}`);
+      await loadProfiles();
+      setTimeout(() => setBanStatusFeedback(null), 4000);
+    } else {
+      setBanStatusFeedback('Failed to update ban status in Supabase.');
+    }
+  };
+
+  const handleLiftBan = async (userId: string) => {
+    const success = await updateUserBan(userId, null);
+    if (success) {
+      setBanStatusFeedback('Ban lifted successfully.');
+      await loadProfiles();
+      setTimeout(() => setBanStatusFeedback(null), 4000);
+    } else {
+      setBanStatusFeedback('Failed to lift ban in Supabase.');
+    }
+  };
 
   // --- PROMOTIONS EVENT HANDLERS ---
 
@@ -3883,6 +3953,151 @@ export default function AdminPanel({
                     </pre>
                   </div>
                 )}
+              </div>
+
+              {/* User Ban Management Section */}
+              <div className="bg-red-950/20 border border-red-500/20 p-5 rounded-lg text-left text-xs space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Ban className="text-red-400 shrink-0" size={18} />
+                    <div>
+                      <strong className="text-white font-display font-bold uppercase tracking-wider text-xs block">
+                        TEMPORARY BAN & USER SUSPENSION CONTROLS
+                      </strong>
+                      <p className="font-sans text-[11px] text-red-200/70">
+                        Administer temporary bans via Supabase. Banned users are instantly kicked via Realtime and prevented from logging in.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={loadProfiles}
+                    disabled={loadingProfiles}
+                    className="px-2.5 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded text-[11px] font-mono flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-all"
+                  >
+                    <RefreshCw size={12} className={loadingProfiles ? 'animate-spin' : ''} />
+                    <span>Refresh</span>
+                  </button>
+                </div>
+
+                {banStatusFeedback && (
+                  <div className="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-[11px] font-mono">
+                    {banStatusFeedback}
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-2.5 text-ocu-gray" size={14} />
+                    <input
+                      type="text"
+                      placeholder="Search users by email or name..."
+                      value={userSearchQuery}
+                      onChange={(e) => setUserSearchQuery(e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded pl-9 pr-3 py-2 font-mono text-xs text-white placeholder:text-neutral-500 focus:outline-none focus:border-red-500"
+                    />
+                  </div>
+
+                  {loadingProfiles && profilesList.length === 0 ? (
+                    <div className="py-6 text-center text-ocu-gray font-mono text-xs">
+                      Loading user accounts...
+                    </div>
+                  ) : profilesList.length === 0 ? (
+                    <div className="py-6 text-center text-neutral-400 font-mono text-xs bg-black/20 rounded border border-white/5">
+                      No user profiles found in Supabase public.profiles table.
+                    </div>
+                  ) : (
+                    <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+                      {profilesList
+                        .filter(p => {
+                          if (!userSearchQuery.trim()) return true;
+                          const q = userSearchQuery.toLowerCase();
+                          return (p.email && p.email.toLowerCase().includes(q)) || 
+                                 (p.display_name && p.display_name.toLowerCase().includes(q)) ||
+                                 (p.user_id && p.user_id.toLowerCase().includes(q));
+                        })
+                        .map((p) => {
+                          const isBanned = isUserTemporarilyBanned(p.banned_until);
+                          return (
+                            <div 
+                              key={p.user_id} 
+                              className={`p-3 rounded-lg border text-left transition-all ${
+                                isBanned 
+                                  ? 'bg-red-950/40 border-red-500/40 ring-1 ring-red-500/20' 
+                                  : 'bg-black/40 border-white/5 hover:border-white/10'
+                              }`}
+                            >
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-semibold text-white text-xs">
+                                      {p.display_name || 'Anonymous User'}
+                                    </span>
+                                    {isBanned ? (
+                                      <span className="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold bg-red-500/20 text-red-300 border border-red-500/40 flex items-center gap-1">
+                                        <Ban size={10} /> BANNED
+                                      </span>
+                                    ) : (
+                                      <span className="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                        ACTIVE
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="font-mono text-[11px] text-neutral-400">
+                                    {p.email || 'No email provided'}
+                                  </div>
+                                  {isBanned && p.banned_until && (
+                                    <div className="font-mono text-[10px] text-red-400">
+                                      Suspended until: {new Date(p.banned_until).toLocaleString()}
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                                  {isBanned ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleLiftBan(p.user_id)}
+                                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-mono text-[10px] font-bold uppercase transition-all cursor-pointer shadow"
+                                    >
+                                      Lift Ban
+                                    </button>
+                                  ) : (
+                                    <>
+                                      <button
+                                        type="button"
+                                        title="Ban for 1 hour"
+                                        onClick={() => handleApplyBan(p.user_id, 1)}
+                                        className="px-2 py-1 bg-red-950/60 hover:bg-red-900 border border-red-500/30 text-red-200 rounded font-mono text-[10px] transition-all cursor-pointer"
+                                      >
+                                        +1 Hour
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title="Ban for 24 hours"
+                                        onClick={() => handleApplyBan(p.user_id, 24)}
+                                        className="px-2 py-1 bg-red-950/60 hover:bg-red-900 border border-red-500/30 text-red-200 rounded font-mono text-[10px] transition-all cursor-pointer"
+                                      >
+                                        +24 Hours
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title="Ban for 7 days"
+                                        onClick={() => handleApplyBan(p.user_id, 168)}
+                                        className="px-2 py-1 bg-red-950/60 hover:bg-red-900 border border-red-500/30 text-red-200 rounded font-mono text-[10px] transition-all cursor-pointer"
+                                      >
+                                        +7 Days
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
               </div>
 
             </motion.div>

@@ -6,7 +6,13 @@ import {
   RefreshCw, Sparkles, BookOpen, Layers
 } from 'lucide-react';
 import { AcademyResource, AcademySettings } from '../types';
-import { uploadFileToStorageWithProgress, deleteFileFromStorage } from '../lib/firebase';
+import { 
+  supabase, 
+  isSupabaseConfigured, 
+  uploadAcademyPdfToSupabase, 
+  saveAcademyResourceInSupabase, 
+  deleteAcademyResourceFromSupabase 
+} from '../lib/supabase';
 
 interface AcademyAdminTabProps {
   academyHeading: string;
@@ -127,19 +133,89 @@ export default function AcademyAdminTab({
     setIsAddingOrEditing(true);
   };
 
-  // Handle PDF File Selection (Triggers Native File Picker on Mobile)
-  const handlePdfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Handle PDF File Selection & Cloud Upload to Supabase Storage ('academy-materials')
+  const handlePdfChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (files && files.length > 0) {
-      const file = files[0];
-      if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
-        setFormError('Please select a valid PDF file document.');
-        return;
+    if (!files || files.length === 0) return;
+
+    const file = files[0];
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+      setFormError('Please select a valid PDF file document.');
+      return;
+    }
+
+    setSelectedFile(file);
+    setPdfFileName(file.name);
+    setFormError(null);
+    setFormSuccess(null);
+    setUploadStatus(`Uploading ${file.name} to cloud storage...`);
+    setUploadProgress(20);
+
+    try {
+      const cleanFileName = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+
+      // Upload file directly to Supabase bucket 'academy-materials'
+      const { error: uploadError } = await supabase.storage
+        .from('academy-materials')
+        .upload(cleanFileName, file, {
+          cacheControl: '3600',
+          upsert: true,
+        });
+
+      if (uploadError) {
+        throw new Error(uploadError.message || 'Supabase upload failed');
       }
-      setSelectedFile(file);
-      setPdfFileName(file.name);
-      setFormError(null);
-      setUploadStatus(`Selected: ${file.name} (${Math.round(file.size / 1024)} KB)`);
+
+      setUploadProgress(85);
+
+      // Upon successful upload, retrieve the public URL using getPublicUrl()
+      const { data: publicUrlData } = supabase.storage
+        .from('academy-materials')
+        .getPublicUrl(cleanFileName);
+
+      const publicUrl = publicUrlData?.publicUrl;
+      if (!publicUrl) {
+        throw new Error('Could not retrieve public URL for uploaded PDF.');
+      }
+
+      setPdfUrl(publicUrl);
+      setUploadProgress(100);
+      setUploadStatus(`Uploaded: ${file.name}`);
+      setFormSuccess('PDF uploaded to cloud storage successfully!');
+      setTimeout(() => setFormSuccess(null), 4000);
+
+      // If editing an existing resource, immediately run Supabase update on the Academy database table
+      if (editingResource?.id) {
+        const { error: updateDbError } = await supabase
+          .from('academy_resources')
+          .update({
+            pdf_url: publicUrl,
+            pdf_file_name: file.name,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', editingResource.id);
+
+        if (updateDbError) {
+          console.warn('Supabase row update note:', updateDbError.message);
+        }
+
+        const updated = {
+          ...editingResource,
+          pdfUrl: publicUrl,
+          pdfFileName: file.name,
+          updatedAt: new Date().toISOString()
+        };
+        setEditingResource(updated);
+        setAcademyResources(prev => prev.map(r => r.id === editingResource.id ? updated : r));
+        if (onSaveResource) {
+          await onSaveResource(updated);
+        }
+      }
+    } catch (uploadErr: any) {
+      console.error('[ACADEMY-STORAGE-ERROR] Upload failed:', uploadErr);
+      setUploadProgress(null);
+      setUploadStatus('');
+      setFormError(`Upload failed: ${uploadErr?.message || 'Could not upload PDF file to cloud server. Please check Supabase storage permissions.'}`);
     }
   };
 
@@ -163,25 +239,34 @@ export default function AcademyAdminTab({
     let finalPdfUrl = pdfUrl;
     let finalPdfName = pdfFileName;
 
-    // Upload PDF if a new file was chosen
-    if (selectedFile) {
-      setUploadStatus('Uploading PDF document to cloud storage...');
-      setUploadProgress(10);
+    // Upload PDF if a new file was chosen and not yet uploaded
+    if (selectedFile && (!finalPdfUrl || finalPdfUrl.trim() === '')) {
+      setUploadStatus('Uploading PDF document to Supabase storage...');
+      setUploadProgress(20);
       try {
-        finalPdfUrl = await uploadFileToStorageWithProgress(
-          'academy_pdfs',
-          selectedFile.name,
-          selectedFile,
-          (pct) => setUploadProgress(pct),
-          45000
-        );
+        const cleanFileName = `${Date.now()}_${selectedFile.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+        const { error: uploadError } = await supabase.storage
+          .from('academy-materials')
+          .upload(cleanFileName, selectedFile, { cacheControl: '3600', upsert: true });
+
+        if (uploadError) {
+          throw new Error(uploadError.message);
+        }
+
+        const { data: urlData } = supabase.storage
+          .from('academy-materials')
+          .getPublicUrl(cleanFileName);
+
+        finalPdfUrl = urlData?.publicUrl || '';
         finalPdfName = selectedFile.name;
+        setPdfUrl(finalPdfUrl);
         setUploadStatus('PDF upload complete!');
-      } catch (uploadErr) {
-        console.warn('Cloud storage upload warning, storing local fallback URL:', uploadErr);
-        // Fallback to local object URL or data URL
-        finalPdfUrl = URL.createObjectURL(selectedFile);
-        finalPdfName = selectedFile.name;
+      } catch (uploadErr: any) {
+        setIsSubmitting(false);
+        setUploadProgress(null);
+        setUploadStatus('');
+        setFormError(`PDF cloud upload failed: ${uploadErr?.message || 'Could not upload file to Supabase Storage'}`);
+        return;
       }
     }
 
@@ -218,10 +303,19 @@ export default function AcademyAdminTab({
     };
 
     try {
+      // 1. Run Supabase update() or insert() (upsert) on the Academy database table
+      try {
+        await saveAcademyResourceInSupabase(newResource);
+      } catch (supabaseErr) {
+        console.warn('Supabase academy_resources table save note:', supabaseErr);
+      }
+
+      // 2. Call parent callback
       if (onSaveResource) {
         await onSaveResource(newResource);
       }
 
+      // 3. Update local state
       setAcademyResources(prev => {
         const exists = prev.some(r => r.id === resourceId);
         const updated = exists 
@@ -231,7 +325,7 @@ export default function AcademyAdminTab({
         try {
           localStorage.setItem('ocu_academy_resources', JSON.stringify(updated));
         } catch {
-          // Ignore local storage quota limits
+          // Ignore storage limits
         }
         return updated;
       });
@@ -261,7 +355,14 @@ export default function AcademyAdminTab({
     const titleToRemove = targetResource ? targetResource.title : 'Study material';
 
     try {
-      // 1. Immediately update component and parent state array so card vanishes instantly from UI
+      // 1. Delete from Supabase DB table
+      try {
+        await deleteAcademyResourceFromSupabase(id);
+      } catch (dbErr) {
+        console.warn('Supabase delete error note:', dbErr);
+      }
+
+      // 2. Immediately update state array
       setAcademyResources(prev => {
         const filtered = prev.filter((r, idx) => r.id !== id && idx !== index);
         try {
@@ -273,7 +374,7 @@ export default function AcademyAdminTab({
         return filtered;
       });
 
-      // 2. Trigger parent onDeleteResource callback to sync Firestore and App level state
+      // 3. Trigger parent callback
       if (onDeleteResource) {
         await onDeleteResource(id, index);
       }

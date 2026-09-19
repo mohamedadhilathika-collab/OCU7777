@@ -98,6 +98,20 @@ export default function LoginPage({ onLoginSuccess, onContinueAsGuest, initialEr
           // Explicitly clear any admin flags upon user sign-in
           clearStoredAdminFlags();
 
+          // REQUIREMENT 2: Immediately upon successful authentication, query the user's profile.
+          // If current date and time is before banned_until timestamp, instantly trigger sign-out, deny access,
+          // and display a prominent UI message: "You are banned temporarily."
+          const banStatus = await checkUserBanStatus(data.user.id, data.user.user_metadata);
+          if (banStatus.isBanned) {
+            await supabase.auth.signOut();
+            const untilStr = banStatus.bannedUntil
+              ? ` Access is suspended until ${new Date(banStatus.bannedUntil).toLocaleString()}.`
+              : '';
+            setErrorMsg(`You are banned temporarily.${untilStr}`);
+            setLoading(false);
+            return;
+          }
+
           const profile = {
             user_id: data.user.id,
             email: data.user.email || '',
@@ -127,6 +141,17 @@ export default function LoginPage({ onLoginSuccess, onContinueAsGuest, initialEr
 
           // If confirmation is required, user is not fully logged in yet
           if (data.session) {
+            const banStatus = await checkUserBanStatus(data.user.id, data.user.user_metadata);
+            if (banStatus.isBanned) {
+              await supabase.auth.signOut();
+              const untilStr = banStatus.bannedUntil
+                ? ` Access is suspended until ${new Date(banStatus.bannedUntil).toLocaleString()}.`
+                : '';
+              setErrorMsg(`You are banned temporarily.${untilStr}`);
+              setLoading(false);
+              return;
+            }
+
             const profile = {
               user_id: data.user.id,
               email: data.user.email || '',
@@ -197,12 +222,33 @@ export default function LoginPage({ onLoginSuccess, onContinueAsGuest, initialEr
         {/* Info/Error Banners */}
         {errorMsg && (
           <motion.div 
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            className="mb-5 bg-ocu-crimson/10 border border-ocu-crimson/20 p-3.5 rounded-lg flex gap-3 text-left"
+            initial={{ opacity: 0, scale: 0.96 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className={`mb-5 p-4 rounded-xl text-left border transition-all ${
+              errorMsg.toLowerCase().includes('banned temporarily')
+                ? 'bg-gradient-to-r from-red-950/80 to-red-900/40 border-red-500/60 shadow-lg shadow-red-950/50 ring-1 ring-red-500/40'
+                : 'bg-ocu-crimson/10 border-ocu-crimson/20'
+            }`}
           >
-            <AlertCircle className="text-ocu-crimson shrink-0 mt-0.5" size={16} />
-            <span className="font-sans text-xs text-red-200 leading-relaxed">{errorMsg}</span>
+            <div className="flex items-start gap-3">
+              {errorMsg.toLowerCase().includes('banned temporarily') ? (
+                <div className="p-2 rounded-lg bg-red-500/20 border border-red-500/30 shrink-0 mt-0.5">
+                  <Ban className="text-red-400 w-5 h-5 animate-pulse" />
+                </div>
+              ) : (
+                <AlertCircle className="text-ocu-crimson shrink-0 mt-0.5" size={16} />
+              )}
+              <div className="space-y-1">
+                {errorMsg.toLowerCase().includes('banned temporarily') && (
+                  <div className="font-display font-black text-sm tracking-wider uppercase text-red-400 flex items-center gap-2">
+                    <span>SECURITY SUSPENSION ACTIVE</span>
+                  </div>
+                )}
+                <span className="font-sans text-xs text-red-200 leading-relaxed block font-medium">
+                  {errorMsg}
+                </span>
+              </div>
+            </div>
           </motion.div>
         )}
 
