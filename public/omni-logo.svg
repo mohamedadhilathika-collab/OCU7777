@@ -17,6 +17,12 @@
       <stop offset="78%" stop-color="#FFA800" />
       <stop offset="100%" stop-color="#FFC200" />
     </linearGradient>
+
+    <!-- Subtle Glow -->
+    <filter id="logoGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
   </defs>
 
   <!-- Pitch Black Canvas -->
@@ -36,6 +42,14 @@
   />
 
   <!-- Omega / Horseshoe Emblem with Inward Feet Tabs -->
+  <!-- 
+    Center of arch: (256, 238)
+    Outer radius: 122
+    Inner radius: 74
+    Left leg: outer x=134, inner x=182. Bottom y=344. Inward tab goes to x=214, height 28 (from y=316 to 344).
+    Right leg: inner x=330, outer x=378. Bottom y=344. Inward tab goes from x=298, height 28 (from y=316 to 344).
+    Gap between tabs: 298 - 214 = 84px.
+  -->
   <path
     d="
       M 134,238

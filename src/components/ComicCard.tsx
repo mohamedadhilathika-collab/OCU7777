@@ -13,6 +13,9 @@ interface ComicCardProps {
   onRead?: (comic: ComicVolume) => void;
   onUnlockComic?: (comic: ComicVolume) => void | Promise<void>;
   userEmail?: string;
+  isGuest?: boolean;
+  user?: any;
+  onRequireAuth?: () => void;
   showToast?: (message: string, type?: 'success' | 'error' | 'info' | 'warning', title?: string) => void;
 }
 
@@ -23,6 +26,9 @@ export default function ComicCard({
   onRead,
   onUnlockComic,
   userEmail = 'mohamedadhilathika@gmail.com',
+  isGuest = false,
+  user = null,
+  onRequireAuth,
   showToast
 }: ComicCardProps) {
   const isReleased = comic.releaseStatus === 'Released';
@@ -97,6 +103,16 @@ export default function ComicCard({
   const handlePayClick = (e: React.MouseEvent) => {
     e.stopPropagation();
 
+    // Module 2: Guest Authentication Gate Interception Check
+    if (isGuest || !user) {
+      if (onRequireAuth) {
+        onRequireAuth();
+      } else if (showToast) {
+        showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
+      }
+      return;
+    }
+
     // 1. Trigger exact UPI intent
     triggerUpiIntent(comic.price);
 
@@ -113,10 +129,21 @@ export default function ComicCard({
 
   /**
    * Handle READ NOW click:
-   * STRICT ACCESS CONTROL: Only allow reading if price == 0 or item IS unlocked!
+   * STRICT ACCESS CONTROL: Only allow reading if authenticated, and if price == 0 or item IS unlocked!
    */
   const handleReadClick = (e: React.MouseEvent) => {
     e.stopPropagation();
+
+    // Module 2: Guest Authentication Gate Interception Check
+    if (isGuest || !user) {
+      if (onRequireAuth) {
+        onRequireAuth();
+      } else if (showToast) {
+        showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
+      }
+      return;
+    }
+
     if (comic.price > 0 && !isUnlocked) {
       // Paywall bypass blocked! Trigger payment flow
       handlePayClick(e);

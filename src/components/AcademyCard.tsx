@@ -16,6 +16,9 @@ interface AcademyCardProps {
   onRead: (item: AcademyResource) => void;
   onUnlock?: (item: AcademyResource) => void | Promise<void>;
   userEmail?: string;
+  isGuest?: boolean;
+  user?: any;
+  onRequireAuth?: () => void;
   showToast?: (message: string, type?: 'success' | 'error' | 'info' | 'warning', title?: string) => void;
 }
 
@@ -26,6 +29,9 @@ export default function AcademyCard({
   onRead,
   onUnlock,
   userEmail = 'mohamedadhilathika@gmail.com',
+  isGuest = false,
+  user = null,
+  onRequireAuth,
   showToast
 }: AcademyCardProps) {
   // Local unlock persistence state for this specific academy item
@@ -100,6 +106,16 @@ export default function AcademyCard({
   const handlePayClick = (e: React.MouseEvent) => {
     e.stopPropagation();
 
+    // Module 2: Guest Authentication Gate Interception Check
+    if (isGuest || !user) {
+      if (onRequireAuth) {
+        onRequireAuth();
+      } else if (showToast) {
+        showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
+      }
+      return;
+    }
+
     // 1. Trigger UPI deep link
     triggerUpiIntent(item.priceINR);
 
@@ -112,6 +128,25 @@ export default function AcademyCard({
       URL.revokeObjectURL(previewUrl);
       setPreviewUrl('');
     }
+  };
+
+  /**
+   * Handle READ STUDY NOTES (PDF) button click
+   */
+  const handleReadClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+
+    // Module 2: Guest Authentication Gate Interception Check
+    if (isGuest || !user) {
+      if (onRequireAuth) {
+        onRequireAuth();
+      } else if (showToast) {
+        showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
+      }
+      return;
+    }
+
+    onRead(item);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -307,7 +342,7 @@ export default function AcademyCard({
               <button
                 type="button"
                 id={`btn-read-academy-${item.id}`}
-                onClick={() => onRead(item)}
+                onClick={handleReadClick}
                 className="w-full py-3 px-4 rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-black font-display font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer shadow-md flex items-center justify-center gap-2 hover:shadow-lg"
               >
                 <FileText size={14} />

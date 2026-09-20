@@ -1,0 +1,181 @@
+/* =========================================================
+   LEGENDARY CINEMATIC SPLASH SCREEN STYLES (OMNI COMIC PWA)
+   Total Animation Duration: 4.5 Seconds (60fps GPU Accelerated)
+   ========================================================= */
+
+@keyframes cinematicEntry {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+    pointer-events: all;
+  }
+  84% {
+    transform: scale(1);
+    opacity: 1;
+    pointer-events: all;
+  }
+  100% {
+    transform: scale(1.5);
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+@keyframes logoPulse {
+  0% {
+    opacity: 0;
+    transform: scale(0.7);
+    filter: drop-shadow(0 0 0px rgba(255, 69, 0, 0));
+  }
+  33% {
+    opacity: 1;
+    transform: scale(1);
+    filter: drop-shadow(0 0 5px rgba(255, 69, 0, 0.4));
+  }
+  55% {
+    transform: scale(1.05);
+    filter: drop-shadow(0 0 25px rgba(255, 69, 0, 1));
+  }
+  84% {
+    opacity: 1;
+    transform: scale(1.05);
+    filter: drop-shadow(0 0 25px rgba(255, 69, 0, 1));
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1.05);
+    filter: drop-shadow(0 0 25px rgba(255, 69, 0, 1));
+  }
+}
+
+@keyframes titleTracking {
+  0% {
+    opacity: 0;
+    transform: translateY(20px);
+    letter-spacing: 2px;
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0px);
+    letter-spacing: 12px;
+  }
+}
+
+/* Ambient Radial Particle Glow behind Logo */
+@keyframes ambientAuraPulse {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 0.35;
+    transform: scale(1.1);
+  }
+  80% {
+    opacity: 0.5;
+    transform: scale(1.25);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+/* Master Overlay Wrapper */
+.splash-screen-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  background-color: #000000;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+  user-select: none;
+  animation: cinematicEntry 4.5s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+  will-change: transform, opacity;
+}
+
+/* Atmospheric Glow Background */
+.splash-ambient-glow {
+  position: absolute;
+  width: 420px;
+  height: 420px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 26, 64, 0.35) 0%, rgba(255, 106, 0, 0.15) 45%, transparent 70%);
+  filter: blur(45px);
+  pointer-events: none;
+  animation: ambientAuraPulse 4.5s ease-out forwards;
+}
+
+/* Central Content Container */
+.splash-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 1.5rem;
+  z-index: 10;
+}
+
+/* The Animated Omega Logo */
+.splash-logo {
+  width: 150px;
+  height: 150px;
+  object-fit: contain;
+  animation: logoPulse 4.5s ease-in-out forwards;
+  will-change: transform, opacity, filter;
+}
+
+@media (min-width: 640px) {
+  .splash-logo {
+    width: 180px;
+    height: 180px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .splash-logo {
+    width: 210px;
+    height: 210px;
+  }
+}
+
+/* The Cinematic Tracking Title */
+.splash-title {
+  margin-top: 2rem;
+  font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  font-weight: 800;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  background: linear-gradient(135deg, #ff1a40 0%, #ff6a00 50%, #fbbf24 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
+  opacity: 0;
+  letter-spacing: 2px;
+  animation: titleTracking 2.5s ease-out forwards;
+  animation-delay: 2.0s;
+  will-change: transform, opacity, letter-spacing;
+  text-align: center;
+  max-width: 90vw;
+  padding-left: 12px; /* balances end letter-spacing */
+}
+
+@media (min-width: 640px) {
+  .splash-title {
+    font-size: 1.05rem;
+    margin-top: 2.25rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .splash-title {
+    font-size: 1.25rem;
+    margin-top: 2.5rem;
+  }
+}

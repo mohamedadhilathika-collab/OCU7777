@@ -283,7 +283,7 @@ export default function LoginPage({ onLoginSuccess, onContinueAsGuest, initialEr
                   <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.85c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
                 </svg>
               )}
-              <span>{googleLoading ? 'CONNECTING...' : 'CONTINUE WITH GOOGLE'}</span>
+              <span>{googleLoading ? 'CONNECTING TO GOOGLE...' : 'LOGIN WITH GOOGLE'}</span>
             </button>
 
             <div className="flex items-center gap-4 my-4">
@@ -432,14 +432,14 @@ export default function LoginPage({ onLoginSuccess, onContinueAsGuest, initialEr
 
           <div className="h-[1px] bg-white/5" />
 
-          {/* Continue as Guest */}
+          {/* Button B (Secondary/Text): Continue as Guest */}
           <button
             id="btn-guest-continue"
             type="button"
             onClick={onContinueAsGuest}
-            className="font-mono text-[10px] text-ocu-gray hover:text-white hover:underline transition-colors tracking-wider uppercase cursor-pointer block w-full text-center"
+            className="w-full py-2.5 px-4 font-mono text-xs text-ocu-gray hover:text-white hover:bg-white/5 border border-white/5 hover:border-white/10 rounded-lg transition-all tracking-wider uppercase cursor-pointer block text-center"
           >
-            CONTINUE AS GUEST // READ-ONLY MODE 🔍
+            Continue as Guest
           </button>
         </div>
       </motion.div>

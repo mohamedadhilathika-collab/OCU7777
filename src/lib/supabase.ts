@@ -1652,6 +1652,79 @@ export async function banUserDeviceByEmail(targetEmail: string): Promise<{ succe
   return { success: true, message: 'Target device blacklisted permanently.', deviceId: retrievedId };
 }
 
+/**
+ * Module 1: Unban Device
+ * Queries profiles table where email === targetEmail and retrieves their device_id string.
+ * Executes DELETE query on banned_devices table where device_id === profile.device_id.
+ */
+export async function unbanUserDeviceByEmail(targetEmail: string): Promise<{ success: boolean; message: string; deviceId?: string }> {
+  const email = targetEmail.trim();
+  if (!email) {
+    return { success: false, message: 'Please enter target user email.' };
+  }
+
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error('Database is not configured');
+  }
+
+  // 1. Query the profiles table to retrieve that user's device_id
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('device_id')
+    .eq('email', email)
+    .single();
+
+  if (profileError || !profile || !profile.device_id) {
+    console.warn('Profile or device_id not found for unban:', profileError);
+    throw new Error('User profile not found or no device ID recorded for this user.');
+  }
+
+  const deviceId = profile.device_id;
+
+  // 2. If a device_id is found, execute a DELETE query on the banned_devices table
+  const { error: deleteError } = await supabase
+    .from('banned_devices')
+    .delete()
+    .eq('device_id', deviceId);
+
+  if (deleteError) {
+    console.error('Error deleting from banned_devices:', deleteError);
+    throw deleteError;
+  }
+
+  // Also remove from local device cache if applicable
+  try {
+    const cached = localStorage.getItem('ocu_banned_devices_list');
+    if (cached) {
+      let list = JSON.parse(cached);
+      if (Array.isArray(list)) {
+        list = list.filter(d => d !== deviceId);
+        localStorage.setItem('ocu_banned_devices_list', JSON.stringify(list));
+      }
+    }
+
+    const { data: adminData } = await supabase
+      .from('admin_settings')
+      .select('value')
+      .eq('key', 'ocu_banned_devices')
+      .maybeSingle();
+
+    if (adminData?.value) {
+      let list = typeof adminData.value === 'string' ? JSON.parse(adminData.value) : adminData.value;
+      if (Array.isArray(list)) {
+        list = list.filter((d: string) => d !== deviceId);
+        await supabase
+          .from('admin_settings')
+          .upsert({ key: 'ocu_banned_devices', value: JSON.stringify(list) }, { onConflict: 'key' });
+      }
+    }
+  } catch (cleanErr) {
+    console.warn('Cache unban clean note:', cleanErr);
+  }
+
+  return { success: true, message: 'Device successfully unbanned. The user can now access the app again.', deviceId };
+}
+
 export interface SecurityEvent {
   id: string;
   event_type: string;

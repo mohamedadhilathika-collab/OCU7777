@@ -23,6 +23,7 @@ import {
   banUserAccount, 
   unbanUserAccount, 
   banUserDeviceByEmail,
+  unbanUserDeviceByEmail,
   banDevicePermanently
 } from '../lib/supabase';
 
@@ -194,6 +195,61 @@ export default function UserManagementAdmin({
     }
   };
 
+  // BUTTON 5: "Unban Device" (Safe color like green or blue)
+  const handleUnbanDevice = async () => {
+    if (!targetEmail.trim()) {
+      notify("Please enter target user's Gmail ID first.", 'warning', 'Target Required');
+      return;
+    }
+
+    setIsProcessing('unban_device');
+    try {
+      if (!isSupabaseConfigured || !supabase) {
+        throw new Error('Supabase client is not configured');
+      }
+
+      // Query the profiles table to retrieve that user's device_id
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('device_id')
+        .eq('email', targetEmail.trim())
+        .single();
+
+      if (profileError || !profile || !profile.device_id) {
+        throw new Error('User profile or device ID not found');
+      }
+
+      // If a device_id is found, execute a DELETE query on the banned_devices table
+      const { error: deleteError } = await supabase
+        .from('banned_devices')
+        .delete()
+        .eq('device_id', profile.device_id);
+
+      if (deleteError) {
+        throw deleteError;
+      }
+
+      // Also clean up local fallback cache
+      try {
+        const cached = localStorage.getItem('ocu_banned_devices_list');
+        if (cached) {
+          let list = JSON.parse(cached);
+          if (Array.isArray(list)) {
+            list = list.filter((d: string) => d !== profile.device_id);
+            localStorage.setItem('ocu_banned_devices_list', JSON.stringify(list));
+          }
+        }
+      } catch {}
+
+      notify("Device successfully unbanned. The user can now access the app again.", 'success', 'Device Unbanned');
+    } catch (err: any) {
+      console.error('Failed to unban device:', err);
+      notify("Failed to unban device.", 'error', 'Unban Failed');
+    } finally {
+      setIsProcessing(null);
+    }
+  };
+
   return (
     <div id="section-user-management-anti-piracy" className="space-y-8 text-left max-w-5xl mx-auto">
       {/* Top Heading Banner */}
@@ -332,7 +388,7 @@ export default function UserManagementAdmin({
             EXECUTE SECURITY ACTION
           </span>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3.5">
             {/* BUTTON 1: "Revoke Item Access" (Warning color) */}
             <button
               id="btn-revoke-item-access"
@@ -374,7 +430,18 @@ export default function UserManagementAdmin({
               className="px-4 py-3.5 bg-black hover:bg-neutral-950 border-2 border-red-700 text-red-400 hover:text-red-300 rounded-lg font-display font-black text-xs uppercase tracking-wider transition-all duration-200 flex items-center justify-center gap-2 cursor-pointer shadow-xl shadow-red-950/50 disabled:opacity-50"
             >
               <Smartphone size={15} className={isProcessing === 'ban_device' ? 'animate-spin' : ''} />
-              <span>{isProcessing === 'ban_device' ? 'Blacklisting...' : 'Ban Device - PERMANENT'}</span>
+              <span>{isProcessing === 'ban_device' ? 'Blacklisting...' : 'Ban Device'}</span>
+            </button>
+
+            {/* BUTTON 5: "Unban Device" (Safe Blue/Emerald color) */}
+            <button
+              id="btn-unban-device"
+              onClick={handleUnbanDevice}
+              disabled={isProcessing !== null}
+              className="px-4 py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-display font-bold text-xs uppercase tracking-wider transition-all duration-200 flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-blue-950/40 disabled:opacity-50"
+            >
+              <Smartphone size={15} className={isProcessing === 'unban_device' ? 'animate-spin' : ''} />
+              <span>{isProcessing === 'unban_device' ? 'Unbanning...' : 'Unban Device'}</span>
             </button>
           </div>
         </div>

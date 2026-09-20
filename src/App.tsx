@@ -57,6 +57,8 @@ import ComicReader from './components/ComicReader';
 import AdminLoginModal from './components/AdminLoginModal';
 import AcademyPdfReader from './components/AcademyPdfReader';
 import AcademyCard from './components/AcademyCard';
+import AuthRequiredModal from './components/AuthRequiredModal';
+import SplashScreen from './components/SplashScreen';
 
 export default function App() {
   const [view, setView] = useState<ViewState>('home');
@@ -107,14 +109,16 @@ export default function App() {
   });
 
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isConfigInitialized, setIsConfigInitialized] = useState(false);
 
   // User Authentication & Profile States
   const [user, setUser] = useState<any>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isGuest, setIsGuest] = useState<boolean>(() => {
-    return localStorage.getItem('ocu_guest_mode') === 'true';
+    return sessionStorage.getItem('ocu_guest_mode') === 'true' || localStorage.getItem('ocu_guest_mode') === 'true';
   });
+  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [banError, setBanError] = useState<string | null>(null);
   const [isDeviceBlacklisted, setIsDeviceBlacklisted] = useState<boolean>(false);
   const [permanentAccountBanError, setPermanentAccountBanError] = useState<string | null>(null);
@@ -202,6 +206,13 @@ export default function App() {
 
   // Function Implementation: openComicReader & viewComic for interactive reading and external triggers
   const openComicReader = useCallback((comicOrId: ComicVolume | string, fileUrl?: string) => {
+    // Module 2: Strict Guest Authentication Gate
+    if (isGuest || !user) {
+      setIsAuthModalOpen(true);
+      showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
+      return;
+    }
+
     let targetComic: ComicVolume | undefined;
 
     if (typeof comicOrId === 'string') {
@@ -276,7 +287,7 @@ export default function App() {
     }
 
     setReadingComic(targetComic);
-  }, [comics, view, showToast, orders, user, activeRedeemedCode]);
+  }, [comics, view, showToast, orders, user, activeRedeemedCode, isGuest]);
 
   const viewComic = openComicReader;
   const handleReadComic = openComicReader;
@@ -295,6 +306,13 @@ export default function App() {
 
       if ((e as any).__comicReadHandled) return;
       (e as any).__comicReadHandled = true;
+
+      // Module 2: Strict Guest Authentication Gate
+      if (isGuest || !user) {
+        setIsAuthModalOpen(true);
+        showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
+        return;
+      }
 
       const comicId = target.getAttribute('data-comic-id') || target.id?.replace('btn-read-comic-', '');
       const fileUrl = target.getAttribute('data-comic-file') || target.getAttribute('data-file-url') || undefined;
@@ -456,141 +474,193 @@ export default function App() {
 
   // Handle User Profile sync and state change subscriptions
   useEffect(() => {
-    if (!isConfigInitialized || !isSupabaseConfigured || !supabase) return;
+    if (!isConfigInitialized) return;
+
+    if (!isSupabaseConfigured || !supabase) {
+      setIsLoading(false);
+      return;
+    }
 
     // Force clear any stale admin state on initial session verification
     clearAdminState();
 
-    // Check current session on load (Requirement 4: Persistent Block on Refresh)
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      const currentDeviceId = getOrCreateDeviceId();
-      const isDevBanned = await isDeviceBannedInDatabase(currentDeviceId);
-      if (isDevBanned) {
-        setIsDeviceBlacklisted(true);
-        return;
-      }
+    let isMounted = true;
 
-      if (session?.user) {
-        const u = session.user;
-        syncDeviceToProfile(u.id, u.email, currentDeviceId).catch(console.error);
+    // Check current session on load (Requirement 1 & 4: Auth Gate with initial session verification)
+    supabase.auth.getSession()
+      .then(async ({ data: { session }, error }) => {
+        try {
+          if (error) {
+            console.error('[Auth Gate] Error retrieving session:', error);
+            return;
+          }
 
-        const isAccBanned = await isAccountBannedInDatabase(u.id, u.email);
-        if (isAccBanned) {
-          console.warn('[Security] User is permanently banned on initial session check. Logging out...');
-          await supabase.auth.signOut();
-          clearAdminState();
-          setUser(null);
-          setUserProfile(null);
-          setIsGuest(false);
-          setPermanentAccountBanError('SECURITY ALERT: Your account has been permanently banned for violating the Terms of Service.');
-          return;
+          const currentDeviceId = getOrCreateDeviceId();
+          const isDevBanned = await isDeviceBannedInDatabase(currentDeviceId);
+          if (isDevBanned) {
+            if (isMounted) setIsDeviceBlacklisted(true);
+            return;
+          }
+
+          if (session?.user) {
+            const u = session.user;
+            syncDeviceToProfile(u.id, u.email, currentDeviceId).catch(console.error);
+
+            const isAccBanned = await isAccountBannedInDatabase(u.id, u.email);
+            if (isAccBanned) {
+              console.warn('[Security] User is permanently banned on initial session check. Logging out...');
+              await supabase.auth.signOut();
+              clearAdminState();
+              if (isMounted) {
+                setUser(null);
+                setUserProfile(null);
+                setIsGuest(false);
+                setPermanentAccountBanError('SECURITY ALERT: Your account has been permanently banned for violating the Terms of Service.');
+              }
+              return;
+            }
+
+            const banCheck = await checkUserBanStatus(u.id, u.user_metadata);
+            if (banCheck.isBanned) {
+              console.warn('[Security] User is temporarily banned on initial session check. Logging out...');
+              await supabase.auth.signOut();
+              clearAdminState();
+              if (isMounted) {
+                setUser(null);
+                setUserProfile(null);
+                setIsGuest(false);
+                const untilStr = banCheck.bannedUntil 
+                  ? ` Access is suspended until ${new Date(banCheck.bannedUntil).toLocaleString()}.`
+                  : '';
+                setBanError(`You are banned temporarily.${untilStr}`);
+              }
+              return;
+            }
+
+            const profile = {
+              user_id: u.id,
+              email: u.email || '',
+              display_name: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0] || 'Unknown User',
+              avatar_url: u.user_metadata?.avatar_url || '',
+              device_id: currentDeviceId,
+              last_login: new Date().toISOString()
+            };
+            if (isMounted) {
+              setUser(u);
+              setUserProfile(profile);
+              setIsGuest(false);
+              setBanError(null);
+            }
+            upsertUserProfile(profile).catch(console.error);
+            loadSupabaseData();
+          }
+        } catch (err) {
+          console.error('[Auth Gate] Session verification error:', err);
+        } finally {
+          if (isMounted) {
+            setIsLoading(false);
+          }
         }
-
-        const banCheck = await checkUserBanStatus(u.id, u.user_metadata);
-        if (banCheck.isBanned) {
-          console.warn('[Security] User is temporarily banned on initial session check. Logging out...');
-          await supabase.auth.signOut();
-          clearAdminState();
-          setUser(null);
-          setUserProfile(null);
-          setIsGuest(false);
-          const untilStr = banCheck.bannedUntil 
-            ? ` Access is suspended until ${new Date(banCheck.bannedUntil).toLocaleString()}.`
-            : '';
-          setBanError(`You are banned temporarily.${untilStr}`);
-          return;
+      })
+      .catch((err) => {
+        console.error('[Auth Gate] getSession unhandled error:', err);
+        if (isMounted) {
+          setIsLoading(false);
         }
-
-        const profile = {
-          user_id: u.id,
-          email: u.email || '',
-          display_name: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0] || 'Unknown User',
-          avatar_url: u.user_metadata?.avatar_url || '',
-          device_id: currentDeviceId,
-          last_login: new Date().toISOString()
-        };
-        setUser(u);
-        setUserProfile(profile);
-        setIsGuest(false);
-        setBanError(null);
-        upsertUserProfile(profile).catch(console.error);
-        loadSupabaseData();
-      }
-    });
+      });
 
     // Set up Auth State Changes (Requirement 4: Persistent block on auth state changes)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log("Auth event:", event, session?.user?.email);
 
-      const currentDeviceId = getOrCreateDeviceId();
-      const isDevBanned = await isDeviceBannedInDatabase(currentDeviceId);
-      if (isDevBanned) {
-        setIsDeviceBlacklisted(true);
-        return;
-      }
-
-      // Force admin state to false on every fresh login, sign-in, token refresh, or sign-out event
-      if (event === 'SIGNED_IN' || event === 'SIGNED_OUT' || event === 'USER_UPDATED') {
-        clearAdminState();
-      }
-
-      if (session?.user) {
-        const u = session.user;
-        syncDeviceToProfile(u.id, u.email, currentDeviceId).catch(console.error);
-
-        const isAccBanned = await isAccountBannedInDatabase(u.id, u.email);
-        if (isAccBanned) {
-          console.warn('[Security] User is permanently banned on auth event. Logging out...');
-          await supabase.auth.signOut();
-          clearAdminState();
-          setUser(null);
-          setUserProfile(null);
-          setIsGuest(false);
-          setPermanentAccountBanError('SECURITY ALERT: Your account has been permanently banned for violating the Terms of Service.');
+      try {
+        const currentDeviceId = getOrCreateDeviceId();
+        const isDevBanned = await isDeviceBannedInDatabase(currentDeviceId);
+        if (isDevBanned) {
+          if (isMounted) setIsDeviceBlacklisted(true);
           return;
         }
 
-        const banCheck = await checkUserBanStatus(u.id, u.user_metadata);
-        if (banCheck.isBanned) {
-          console.warn('[Security] User is temporarily banned on auth event. Logging out...');
-          await supabase.auth.signOut();
+        // Force admin state to false on every fresh login, sign-in, token refresh, or sign-out event
+        if (event === 'SIGNED_IN' || event === 'SIGNED_OUT' || event === 'USER_UPDATED') {
           clearAdminState();
-          setUser(null);
-          setUserProfile(null);
-          setIsGuest(false);
-          const untilStr = banCheck.bannedUntil 
-            ? ` Access is suspended until ${new Date(banCheck.bannedUntil).toLocaleString()}.`
-            : '';
-          setBanError(`You are banned temporarily.${untilStr}`);
-          return;
         }
 
-        const profile = {
-          user_id: u.id,
-          email: u.email || '',
-          display_name: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0] || 'Unknown User',
-          avatar_url: u.user_metadata?.avatar_url || '',
-          device_id: currentDeviceId,
-          last_login: new Date().toISOString()
-        };
-        setUser(u);
-        setUserProfile(profile);
-        setIsGuest(false);
-        setBanError(null);
-        try {
-          await upsertUserProfile(profile);
-        } catch (err) {
-          console.error("Failed to upsert profile:", err);
+        if (session?.user) {
+          const u = session.user;
+          syncDeviceToProfile(u.id, u.email, currentDeviceId).catch(console.error);
+
+          const isAccBanned = await isAccountBannedInDatabase(u.id, u.email);
+          if (isAccBanned) {
+            console.warn('[Security] User is permanently banned on auth event. Logging out...');
+            await supabase.auth.signOut();
+            clearAdminState();
+            if (isMounted) {
+              setUser(null);
+              setUserProfile(null);
+              setIsGuest(false);
+              setPermanentAccountBanError('SECURITY ALERT: Your account has been permanently banned for violating the Terms of Service.');
+            }
+            return;
+          }
+
+          const banCheck = await checkUserBanStatus(u.id, u.user_metadata);
+          if (banCheck.isBanned) {
+            console.warn('[Security] User is temporarily banned on auth event. Logging out...');
+            await supabase.auth.signOut();
+            clearAdminState();
+            if (isMounted) {
+              setUser(null);
+              setUserProfile(null);
+              setIsGuest(false);
+              const untilStr = banCheck.bannedUntil 
+                ? ` Access is suspended until ${new Date(banCheck.bannedUntil).toLocaleString()}.`
+                : '';
+              setBanError(`You are banned temporarily.${untilStr}`);
+            }
+            return;
+          }
+
+          const profile = {
+            user_id: u.id,
+            email: u.email || '',
+            display_name: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0] || 'Unknown User',
+            avatar_url: u.user_metadata?.avatar_url || '',
+            device_id: currentDeviceId,
+            last_login: new Date().toISOString()
+          };
+          if (isMounted) {
+            setUser(u);
+            setUserProfile(profile);
+            setIsGuest(false);
+            setBanError(null);
+            sessionStorage.removeItem('ocu_guest_mode');
+            localStorage.removeItem('ocu_guest_mode');
+          }
+          try {
+            await upsertUserProfile(profile);
+          } catch (err) {
+            console.error("Failed to upsert profile:", err);
+          }
+          loadSupabaseData();
+        } else {
+          clearAdminState();
+          if (isMounted) {
+            setUser(null);
+            setUserProfile(null);
+          }
         }
-        loadSupabaseData();
-      } else {
-        clearAdminState();
-        setUser(null);
-        setUserProfile(null);
+      } catch (err) {
+        console.error('[Auth Gate] Auth state change error:', err);
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     });
 
     return () => {
+      isMounted = false;
       subscription.unsubscribe();
     };
   }, [isConfigInitialized, loadSupabaseData, clearAdminState]);
@@ -744,6 +814,7 @@ export default function App() {
     setUserProfile(null);
     setIsGuest(false);
     setBanError(null);
+    sessionStorage.removeItem('ocu_guest_mode');
     localStorage.removeItem('ocu_guest_mode');
     setView('home');
   };
@@ -784,9 +855,10 @@ export default function App() {
   }, []);
 
   const handleBuyComic = (comic: ComicVolume) => {
-    if (!user) {
-      setIsGuest(false);
-      localStorage.removeItem('ocu_guest_mode');
+    // Module 2: Strict Guest Authentication Gate
+    if (isGuest || !user) {
+      setIsAuthModalOpen(true);
+      showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
       return;
     }
     setSelectedComic(comic);
@@ -845,6 +917,13 @@ export default function App() {
   };
 
   const handleReadAcademyResource = (res: AcademyResource) => {
+    // Module 2: Strict Guest Authentication Gate
+    if (isGuest || !user) {
+      setIsAuthModalOpen(true);
+      showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
+      return;
+    }
+
     if (!isAcademyResourceUnlocked(res)) {
       showToast(
         `"${res.title}" requires payment of ₹${res.priceINR}. Please click "PAY ₹${res.priceINR}" to unlock.`,
@@ -1044,11 +1123,11 @@ export default function App() {
     );
   }
 
-  if (!isConfigInitialized) {
+  if (isLoading || !isConfigInitialized) {
     return (
-      <div className="min-h-screen bg-ocu-dark flex flex-col justify-center items-center">
+      <div id="auth-loading-gate" className="min-h-screen bg-ocu-dark flex flex-col justify-center items-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ocu-gold"></div>
-        <span className="font-mono text-xs text-ocu-gray mt-4 tracking-widest">INITIALIZING SECURE ARCHIVE...</span>
+        <span className="font-mono text-xs text-ocu-gray mt-4 tracking-widest uppercase">INITIALIZING SECURE ARCHIVE...</span>
       </div>
     );
   }
@@ -1064,6 +1143,8 @@ export default function App() {
           setUser(u);
           setUserProfile(profile);
           setIsGuest(false);
+          sessionStorage.removeItem('ocu_guest_mode');
+          localStorage.removeItem('ocu_guest_mode');
           setView('home');
         }}
         onContinueAsGuest={() => {
@@ -1071,6 +1152,7 @@ export default function App() {
           clearAdminState();
           setBanError(null);
           setIsGuest(true);
+          sessionStorage.setItem('ocu_guest_mode', 'true');
           localStorage.setItem('ocu_guest_mode', 'true');
           setView('home');
         }}
@@ -1089,6 +1171,7 @@ export default function App() {
         onOpenAdminLogin={() => setIsLoginModalOpen(true)} 
         user={user}
         userProfile={userProfile}
+        isGuest={isGuest}
         onLogout={handleUserLogout}
       />
 
@@ -1332,6 +1415,9 @@ export default function App() {
                       onBuy={handleBuyComic} 
                       onUnlockComic={handleUnlockComic}
                       userEmail={user?.email || 'mohamedadhilathika@gmail.com'}
+                      isGuest={isGuest}
+                      user={user}
+                      onRequireAuth={() => setIsAuthModalOpen(true)}
                       hasDigitalAccess={!!activeRedeemedCode || comic.price === 0 || orders.some(o => o.comicId === comic.id && o.customerEmail === user?.email && o.status === 'Completed' && o.paymentStatus === 'Paid')}
                       onRead={handleReadComic}
                       showToast={showToast}
@@ -1386,6 +1472,9 @@ export default function App() {
                       onRead={handleReadAcademyResource}
                       onUnlock={handleUnlockAcademyResource}
                       userEmail={user?.email || 'mohamedadhilathika@gmail.com'}
+                      isGuest={isGuest}
+                      user={user}
+                      onRequireAuth={() => setIsAuthModalOpen(true)}
                       showToast={showToast}
                     />
                   ))}
@@ -1436,6 +1525,9 @@ export default function App() {
                     onBuy={handleBuyComic} 
                     onUnlockComic={handleUnlockComic}
                     userEmail={user?.email || 'mohamedadhilathika@gmail.com'}
+                    isGuest={isGuest}
+                    user={user}
+                    onRequireAuth={() => setIsAuthModalOpen(true)}
                     hasDigitalAccess={!!activeRedeemedCode || comic.price === 0 || orders.some(o => o.comicId === comic.id && o.customerEmail === user?.email && o.status === 'Completed' && o.paymentStatus === 'Paid')}
                     onRead={handleReadComic}
                     showToast={showToast}
@@ -1648,6 +1740,11 @@ export default function App() {
                   <button
                     id="btn-modal-open-reader"
                     onClick={() => {
+                      if (isGuest || !user) {
+                        setIsAuthModalOpen(true);
+                        showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
+                        return;
+                      }
                       const res = selectedAcademyResource;
                       setSelectedAcademyResource(null);
                       setReadingAcademyResource(res);
@@ -1661,6 +1758,11 @@ export default function App() {
                   <button
                     id="btn-modal-open-reader"
                     onClick={() => {
+                      if (isGuest || !user) {
+                        setIsAuthModalOpen(true);
+                        showToast("Authentication Required. Please log in to read or purchase materials.", 'warning', 'Authentication Required');
+                        return;
+                      }
                       const res = selectedAcademyResource;
                       const price = res.priceINR;
                       window.location.href = `upi://pay?pa=mohamedadhilathika@okhdfcbank&pn=OmniComic&am=${price}&cu=INR`;
@@ -1923,6 +2025,22 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Strict Authentication Required Modal Gate for Guests */}
+      <AuthRequiredModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onSwitchToLoginScreen={() => {
+          sessionStorage.removeItem('ocu_guest_mode');
+          localStorage.removeItem('ocu_guest_mode');
+          setIsGuest(false);
+          setUser(null);
+        }}
+        showToast={showToast}
+      />
+
+      {/* Legendary Cinematic Initial App Launch Splash Screen (Plays once for 4.5s) */}
+      <SplashScreen />
 
     </div>
   );
