@@ -1,0 +1,6 @@
+{
+  "appId": "com.ocu.comic",
+  "appName": "OCU Comic",
+  "webDir": "build",
+  "bundledWebRuntime": false
+}
